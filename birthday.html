@@ -141,11 +141,22 @@
     function stopConfetti() { confettiRunning = false; confettiParticles = null; }
     function drawConfetti() { if (!confettiRunning) return; confettiParticles.forEach(p => { p.x += p.vx; p.y += p.vy; p.rot += 0.2; if (p.y < 0.05) p.y = 0.05; const s = 0.04; const mat = new THREE.MeshBasicMaterial({ color: p.color }); const geo = new THREE.PlaneGeometry(s, s * 1.6); const mesh = new THREE.Mesh(geo, mat); mesh.position.set(p.x, p.y, p.z); mesh.rotation.y = p.rot; scene.add(mesh); setTimeout(() => { scene.remove(mesh); geo.dispose(); mat.dispose(); }, 40); }); }
 
-    // Video panels
+    // Video panels (larger remote screen + improved texture quality)
     const videoEl = document.createElement('video'); videoEl.autoplay = true; videoEl.muted = true; videoEl.playsInline = true;
-    const videoTexture = new THREE.VideoTexture(videoEl); videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter; videoTexture.format = THREE.RGBAFormat;
-    const leftPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.0), new THREE.MeshBasicMaterial({ map: videoTexture })); leftPlane.position.set(-2.8, 1.6, -2.2); scene.add(leftPlane);
-    const rightPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.0), new THREE.MeshBasicMaterial({ color: 0x222222 })); rightPlane.position.set(2.8, 1.6, -2.2); scene.add(rightPlane);
+    // prefer HD for clearer video
+    const videoTexture = new THREE.VideoTexture(videoEl);
+    videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter; videoTexture.format = THREE.RGBAFormat; videoTexture.generateMipmaps = false;
+    // improve sampling using anisotropy if available
+    const maxAniso = renderer.capabilities.getMaxAnisotropy(); if(maxAniso) videoTexture.anisotropy = maxAniso;
+
+    // left: local preview (smaller)
+    const leftPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.6,1.15), new THREE.MeshBasicMaterial({map: videoTexture}));
+    leftPlane.position.set(-3.2, 1.6, -2.2); scene.add(leftPlane);
+
+    // right: remote big screen (larger)
+    const rightPlane = new THREE.Mesh(new THREE.PlaneGeometry(2.2,1.4), new THREE.MeshBasicMaterial({color:0x222222}));
+    rightPlane.position.set(2.8, 1.7, -2.2); scene.add(rightPlane);
+
 
     // Labels
     const nameTagLeft = document.createElement('div'); nameTagLeft.style.position = 'fixed'; nameTagLeft.style.left = '16px'; nameTagLeft.style.bottom = '16px'; nameTagLeft.style.padding = '6px 10px'; nameTagLeft.style.borderRadius = '12px'; nameTagLeft.style.background = 'rgba(255,255,255,0.9)'; nameTagLeft.innerText = 'You'; document.body.appendChild(nameTagLeft);
@@ -198,7 +209,8 @@
 
     document.getElementById('startBtn').addEventListener('click', async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        // request higher-resolution local camera for clearer remote quality
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }, audio: true });
         videoEl.srcObject = stream; await videoEl.play(); startAudioProcessing(stream); document.getElementById('startBtn').disabled = true; document.getElementById('startBtn').innerText = 'Camera & Mic Running'; localStream = stream;
         if (!peer) {
           const PeerCtor = window.Peer || window.peer || null;
