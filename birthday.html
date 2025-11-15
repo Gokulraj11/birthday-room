@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>3D Birthday Room — Prototype</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    #ui{position:fixed;left:12px;top:12px;z-index:40;color:#222;background:rgba(255,255,255,0.85);padding:10px;border-radius:8px;backdrop-filter:blur(6px)}
+    #canvas-container{height:100%;width:100%;display:block}
+    button,input{margin:6px 4px}
+    #galleryModal{position:fixed;inset:0;background:rgba(0,0,0,0.7);display:none;align-items:center;justify-content:center;z-index:60}
+    #galleryModal img{max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6)}
+    #hint{font-size:13px;color:#444;margin-top:6px}
+    a.small{font-size:12px;color:royalblue}
+  </style>
+
+  <!-- Import map to make bare specifier 'three' resolve to the CDN module URL.
+       This is necessary because some examples/jsm modules import 'three' using a bare specifier. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.156.0/build/three.module.js"
+    }
+  }
+  </script>
+
+  <!-- PeerJS (UMD) for quick peer-to-peer signaling (Option A). Loaded as classic script so window.Peer is available. -->
+  <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <div id="ui">
+    <div><strong>3D Birthday Room (prototype)</strong></div>
+    <div id="controls">
+      <button id="startBtn">Start Camera & Mic</button>
+      <button id="uploadPhotoBtn">Upload Photo for Wall</button>
+      <input id="photoInput" type="file" accept="image/*" style="display:none" />
+      <button id="resetCake">Reset Cake</button>
+    </div>
+    <div id="hint">Click a photo on the wall to view. Blow into mic to extinguish candles.</div>
+  </div>
+
+  <div id="galleryModal"><img id="modalImg" src="" alt="photo" /></div>
+  <div id="canvas-container"></div>
+
+  <!-- Module script: three + OrbitControls + PeerJS integration -->
+  <script type="module">
+    // import using the bare specifier 'three' which will be resolved by the importmap above
+    import * as THREE from 'three';
+    import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.156.0/examples/jsm/controls/OrbitControls.js';
+
+    // --- Basic scene + room ---
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0,2.2,5);
+    const renderer = new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0,1.4,0);
+    controls.update();
+
+    // room: large box with flipped normals
+    const room = new THREE.Mesh(new THREE.BoxGeometry(12,6,10), new THREE.MeshStandardMaterial({color:0xf5f5f5,side:THREE.BackSide}));
+    room.position.y=3;
+    scene.add(room);
+
+    // floor
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(12,10), new THREE.MeshStandardMaterial({color:0xefe6e6}));
+    floor.rotation.x = -Math.PI/2; floor.receiveShadow=true; floor.position.y=0; scene.add(floor);
+
+    // soft lights
+    const hemi = new THREE.HemisphereLight(0xffffee,0x8888ff,0.6); scene.add(hemi);
+    const spot = new THREE.PointLight(0xfff7dd,1.1,20); spot.position.set(0,4,2); scene.add(spot);
+
+    // --- Cake ---
+    const cakeGroup = new THREE.Group();
+    const cakeBody = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.6,32), new THREE.MeshStandardMaterial({color:0xffc0cb}));
+    cakeBody.position.y=0.5; cakeGroup.add(cakeBody);
+    const cakeTop = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.05,32), new THREE.MeshStandardMaterial({color:0xffffff}));
+    cakeTop.position.y=0.8; cakeGroup.add(cakeTop);
+    cakeGroup.position.set(0,0, -1);
+    scene.add(cakeGroup);
+
+    // candles array
+    const candles=[];
+    const flameSprites=[];
+    function createCandles(){
+      for(let i=0;i<5;i++){
+        const theta = (i/5)*Math.PI*2;
+        const x = Math.cos(theta)*0.5*0.6;
+        const z = Math.sin(theta)*0.5*0.6;
+        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.25,12), new THREE.MeshStandardMaterial({color:0xffffff}));
+        candle.position.set(x,0.95,z-1);
+        scene.add(candle);
+        candles.push(candle);
+
+        // small flame using sprite
+        const canvas = document.createElement('canvas'); canvas.width=64; canvas.height=64;
+        const ctx = canvas.getContext('2d');
+        const g = ctx.createRadialGradient(32,16,4,32,32,32);
+        g.addColorStop(0,'rgba(255,255,200,1)'); g.addColorStop(0.4,'rgba(255,140,0,0.95)'); g.addColorStop(1,'rgba(255,100,0,0)');
+        ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(32,22,10,16,0,0,Math.PI*2); ctx.fill();
+        const map = new THREE.CanvasTexture(canvas);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({map:map,depthWrite:false}));
+        sprite.scale.set(0.18,0.28,1); sprite.position.set(x,1.08,z-1);
+        scene.add(sprite); flameSprites.push(sprite);
+      }
+    }
+    createCandles();
+
+    // candle state
+    let candlesLit=true;
+    function extinguishCandles(){
+      if(!candlesLit) return;
+      candlesLit=false;
+      // fade out flames
+      let t=1; const fade = ()=>{
+        t-=0.06; flameSprites.forEach(s=>s.material.opacity=Math.max(0,t));
+        if(t>0) requestAnimationFrame(fade); else {
+          flameSprites.forEach(s=>s.visible=false);
+          showHappyText();
+          startConfetti();
+        }
+      }; fade();
+    }
+    function resetCandles(){
+      candlesLit=true; flameSprites.forEach(s=>{s.visible=true; s.material.opacity=1});
+      stopConfetti(); hideHappyText();
+    }
+
+    // Happy text in 3D
+    const loaderFont = null;
+    const happyDiv = document.createElement('div');
+    happyDiv.style.position='fixed'; happyDiv.style.left='50%'; happyDiv.style.top='14%'; happyDiv.style.transform='translateX(-50%)';
+    happyDiv.style.fontSize='48px'; happyDiv.style.fontWeight='700'; happyDiv.style.color='crimson'; happyDiv.style.textShadow='0 6px 18px rgba(0,0,0,0.35)';
+    happyDiv.style.display='none'; happyDiv.innerText='HAPPY BIRTHDAY 🎉'; document.body.appendChild(happyDiv);
+    function showHappyText(){ happyDiv.style.display='block'; }
+    function hideHappyText(){ happyDiv.style.display='none'; }
+
+    // --- Confetti simple particle system ---
+    let confettiParticles=null; let confettiRunning=false;
+    function startConfetti(){ if(confettiRunning) return; confettiRunning=true;
+      confettiParticles = [];
+      for(let i=0;i<120;i++){ confettiParticles.push({x:(Math.random()-0.5)*3,y:3.2,z:(Math.random()-0.5)*3, vx:(Math.random()-0.5)*0.06, vy: -0.01 - Math.random()*0.03, rot:Math.random()*Math.PI, color: `hsl(${Math.random()*360},70%,60%)`}); }
+    }
+    function stopConfetti(){ confettiRunning=false; confettiParticles=null; }
+    function drawConfetti(){ if(!confettiRunning) return; confettiParticles.forEach(p=>{ p.x += p.vx; p.y += p.vy; p.rot += 0.2; if(p.y<0.05) p.y=0.05; const s = 0.04; const mat = new THREE.MeshBasicMaterial({color:p.color});
+        // draw as simple plane
+        const geo = new THREE.PlaneGeometry(s,s*1.6);
+        const mesh = new THREE.Mesh(geo, mat); mesh.position.set(p.x,p.y,p.z); mesh.rotation.y = p.rot; scene.add(mesh);
+        // remove after one frame by scheduling removal
+        setTimeout(()=>{ scene.remove(mesh); geo.dispose(); mat.dispose(); }, 40);
+      });
+    }
+
+    // --- Video panels for two people ---
+    const videoEl = document.createElement('video'); videoEl.autoplay=true; videoEl.muted=true; videoEl.playsInline=true;
+    const videoTexture = new THREE.VideoTexture(videoEl);
+    videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter; videoTexture.format = THREE.RGBAFormat;
+
+    const leftPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4,1.0), new THREE.MeshBasicMaterial({map:videoTexture}));
+    leftPlane.position.set(-2.8,1.6,-2.2); scene.add(leftPlane);
+    const rightPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4,1.0), new THREE.MeshBasicMaterial({color:0x222222}));
+    rightPlane.position.set(2.8,1.6,-2.2); scene.add(rightPlane);
+
+    // label text using DOM overlay
+    const nameTagLeft = document.createElement('div'); nameTagLeft.style.position='fixed'; nameTagLeft.style.left='12px'; nameTagLeft.style.bottom='12px'; nameTagLeft.style.padding='6px 10px'; nameTagLeft.style.borderRadius='12px'; nameTagLeft.style.background='rgba(255,255,255,0.8)'; nameTagLeft.innerText='You'; document.body.appendChild(nameTagLeft);
+    const nameTagRight = document.createElement('div'); nameTagRight.style.position='fixed'; nameTagRight.style.right='12px'; nameTagRight.style.bottom='12px'; nameTagRight.style.padding='6px 10px'; nameTagRight.style.borderRadius='12px'; nameTagRight.style.background='rgba(255,255,255,0.8)'; nameTagRight.innerText='Her (upload photo)'; document.body.appendChild(nameTagRight);
+
+    // allow upload to set right panel image
+    const photoInput = document.getElementById('photoInput');
+    photoInput.addEventListener('change', (ev)=>{
+      const f = ev.target.files[0]; if(!f) return; const url = URL.createObjectURL(f);
+      const tex = new THREE.TextureLoader().load(url); rightPlane.material.map = tex; rightPlane.material.color.set(0xffffff); rightPlane.material.needsUpdate=true;
+    });
+
+    // interactive wall photos: create 4 placeholders
+    const wallPhotos=[];
+    const raycaster = new THREE.Raycaster(); const mouse = new THREE.Vector2();
+    function createWallPhotos(){
+      const px = -4.4; const startY = 2.4; for(let i=0;i<4;i++){
+        const geom = new THREE.PlaneGeometry(0.9,0.6);
+        const mat = new THREE.MeshStandardMaterial({color:0xdddddd});
+        const mesh = new THREE.Mesh(geom, mat); mesh.position.set(px + (i%2)*1.2, startY - Math.floor(i/2)*0.9, -4.9); scene.add(mesh);
+        wallPhotos.push(mesh);
+      }
+    }
+    createWallPhotos();
+
+    // modal for viewing photos
+    const galleryModal = document.getElementById('galleryModal'); const modalImg = document.getElementById('modalImg');
+    galleryModal.addEventListener('click', ()=>{ galleryModal.style.display='none'; modalImg.src=''; });
+
+    // upload to populate next wall slot
+    document.getElementById('uploadPhotoBtn').addEventListener('click', ()=> photoInput.click());
+    photoInput.addEventListener('change', (ev)=>{
+      const f = ev.target.files[0]; if(!f) return; const url = URL.createObjectURL(f);
+      // find first empty slot
+      const slot = wallPhotos.find(w=>!w.userData.url);
+      if(!slot){ alert('All wall slots used. Remove photos by reloading the page.'); return; }
+      slot.userData.url = url; const t = new THREE.TextureLoader().load(url); slot.material.map = t; slot.material.color.set(0xffffff); slot.material.needsUpdate=true;
+    });
+
+    // detect clicks on wall photos
+    renderer.domElement.addEventListener('pointerdown', (ev)=>{
+      const rect = renderer.domElement.getBoundingClientRect(); mouse.x = ((ev.clientX-rect.left)/rect.width)*2-1; mouse.y = -((ev.clientY-rect.top)/rect.height)*2+1;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(wallPhotos);
+      if(hits.length>0){ const obj = hits[0].object; if(obj.userData.url){ modalImg.src = obj.userData.url; galleryModal.style.display='flex'; }
+      }
+    });
+
+    // --- Microphone / Blow detection ---
+    let audioCtx, analyser, micStream;
+    let blowCooldown = false;
+
+    function startAudioProcessing(stream){
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      micStream = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
+      micStream.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      let rmsHistory = [];
+      function analyze(){
+        analyser.getByteFrequencyData(data);
+        // compute low-frequency energy (bins 0..10) and overall RMS
+        let low=0; let total=0;
+        for(let i=0;i<data.length;i++){ total += data[i]*data[i]; if(i<12) low += data[i]; }
+        const rms = Math.sqrt(total/data.length);
+        rmsHistory.push(rms); if(rmsHistory.length>10) rmsHistory.shift();
+        const avgRMS = rmsHistory.reduce((a,b)=>a+b,0)/rmsHistory.length;
+        // blow detection heuristic: strong low-freq spike and rms > baseline*2
+        if(!blowCooldown && low > 2200 && rms > avgRMS*1.7 && rms>18){
+          blowCooldown = true; extinguishCandles(); setTimeout(()=> blowCooldown=false, 3500);
+        }
+        requestAnimationFrame(analyze);
+      }
+      analyze();
+    }
+
+    // ---------- PeerJS P2P integration (Option A) ----------
+    // Uses the PeerJS cloud signaling server by default. This provides an extremely quick way
+    // to connect two browsers (1:1). For production/privacy you can self-host PeerServer.
+    let peer = null; // PeerJS Peer instance
+    let localStream = null; // MediaStream from getUserMedia
+
+    // Create a small container inside the existing #ui so layout won't obscure it.
+    const peerUi = document.createElement('div');
+    peerUi.style.display = 'flex';
+    peerUi.style.flexDirection = 'column';
+    peerUi.style.gap = '6px';
+    peerUi.style.marginTop = '8px';
+    peerUi.style.zIndex = '9999';
+    peerUi.style.pointerEvents = 'auto';
+
+    const peerIdLabel = document.createElement('div');
+    peerIdLabel.style.padding = '6px 10px'; peerIdLabel.style.borderRadius = '8px'; peerIdLabel.style.background = 'rgba(255,255,255,0.95)';
+    peerIdLabel.style.fontWeight = '600'; peerIdLabel.style.fontSize = '13px'; peerIdLabel.style.color = '#111';
+    peerIdLabel.innerText = 'Peer: (not ready)';
+    peerUi.appendChild(peerIdLabel);
+
+    const row = document.createElement('div'); row.style.display='flex'; row.style.gap='6px'; peerUi.appendChild(row);
+    const callInput = document.createElement('input'); callInput.placeholder='Partner PeerID'; callInput.style.width='160px'; callInput.style.padding='6px 8px'; callInput.style.borderRadius='6px'; callInput.style.border='1px solid rgba(0,0,0,0.12)';
+    row.appendChild(callInput);
+    const callBtn = document.createElement('button'); callBtn.innerText='Call'; callBtn.style.padding='6px 10px'; callBtn.style.borderRadius='6px'; row.appendChild(callBtn);
+
+    const remoteVideo = document.createElement('video'); remoteVideo.autoplay = true; remoteVideo.playsInline = true; remoteVideo.muted = false; remoteVideo.style.display='none'; document.body.appendChild(remoteVideo);
+
+    // append our small peer UI into the main controls so it won't get hidden behind the scene
+    const controlsDiv = document.getElementById('controls'); controlsDiv.appendChild(peerUi);
+
+    function applyRemoteStreamToRightPlane(videoElem){
+      // ensure video is playing
+      try{ videoElem.play().catch(()=>{}); }catch(e){}
+      const remoteTex = new THREE.VideoTexture(videoElem);
+      remoteTex.minFilter = THREE.LinearFilter; remoteTex.magFilter = THREE.LinearFilter; remoteTex.format = THREE.RGBAFormat;
+      rightPlane.material.map = remoteTex; rightPlane.material.needsUpdate = true;
+      nameTagRight.innerText = 'Her (live)';
+    }
+
+    // Start camera & mic handler will initialize PeerJS once localStream is available
+    document.getElementById('startBtn').addEventListener('click', async ()=>{
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+        // set video element source
+        videoEl.srcObject = stream; await videoEl.play();
+        // start audio processing on separate track(s)
+        startAudioProcessing(stream);
+        document.getElementById('startBtn').disabled=true; document.getElementById('startBtn').innerText='Camera & Mic Running';
+
+        // keep local stream for calls
+        localStream = stream;
+
+        // initialize PeerJS (use default PeerServer cloud). Creating Peer without an id lets server assign one.
+        if(!peer){
+          // make sure the PeerJS script loaded and exposed a constructor on window
+          const PeerCtor = window.Peer || window.peer || null;
+          if(!PeerCtor){
+            peerIdLabel.innerText = 'PeerJS not loaded. Ensure peerjs script is included and you are serving the page over http(s).';
+            console.warn('PeerJS library not found on window.');
+          } else {
+            try{
+              peer = new PeerCtor();
+            }catch(e){
+              console.warn('Failed to create Peer instance:', e);
+              peerIdLabel.innerText = 'Peer creation failed: '+(e && e.message);
+            }
+            if(peer){
+              peer.on('open', id=>{ peerIdLabel.innerText = 'Your PeerID: ' + id; });
+              peer.on('error', err=>{ console.warn('Peer error', err); peerIdLabel.innerText = 'Peer error: '+(err && err.message ? err.message : err); });
+              peer.on('disconnected', ()=>{ peerIdLabel.innerText = 'Peer disconnected'; });
+
+              // incoming call handler
+              peer.on('call', call => {
+                console.log('Incoming call from', call.peer);
+                // answer with our stream (if available)
+                if(localStream) call.answer(localStream);
+                call.on('stream', remoteStream => {
+                  remoteVideo.srcObject = remoteStream;
+                  applyRemoteStreamToRightPlane(remoteVideo);
+                });
+              });
+            }
+          }
+        }
+      }catch(e){ alert('Camera/Mic access failed: '+e.message); }
+    });
+
+    // Call button behaviour
+    callBtn.addEventListener('click', ()=>{
+      const otherId = callInput.value.trim();
+      if(!peer) return alert('Start camera and wait for PeerID before calling.');
+      if(!otherId) return alert('Enter partner PeerID to call.');
+      if(!localStream) return alert('Local stream not ready.');
+      try{
+        const call = peer.call(otherId, localStream);
+        call.on('stream', remoteStream =>{
+          remoteVideo.srcObject = remoteStream;
+          applyRemoteStreamToRightPlane(remoteVideo);
+        });
+        call.on('error', e=>{ console.warn('Call error', e); alert('Call error: '+(e && e.message)); });
+      }catch(e){ console.warn('Failed to place call:', e); alert('Call failed: '+(e && e.message)); }
+    });
+
+    // ---------- End PeerJS integration ----------
+
+    // start camera & mic (legacy binding removed earlier) — already handled above
+
+    // reset
+    document.getElementById('resetCake').addEventListener('click', ()=> resetCandles());
+
+    // handle window
+    window.addEventListener('resize', ()=>{ camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+    // --- Animation loop ---
+    function animate(){ requestAnimationFrame(animate);
+      // subtle flame flicker
+      if(candlesLit){ flameSprites.forEach((s,i)=>{ s.position.y = 1.06 + Math.sin(Date.now()*0.007 + i)*0.01; s.material.rotation = Math.sin(Date.now()*0.01 + i)*0.3; }); }
+      // confetti
+      drawConfetti();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // small note to user shown in DOM
+    // End of module script
+  </script>
+</body>
+</html>
