@@ -6,44 +6,24 @@
   <title>3D Birthday Room — Prototype</title>
   <style>
     :root{
-      --bg:#f7f7fb; --card:#ffffff; --muted:#6b6f76; --accent:#ff5c8a;
+      --bg:#f7f7fb; --card:#ffffff; --muted:#6b6f76; --accent:#ff5c8a; --topbar-h:64px; --gap:12px;
     }
     html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:#111}
-
-    /* Top bar: single-row layout with controls */
-    .topbar{
-      position:fixed;left:12px;right:12px;top:12px;z-index:1000;display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.95),rgba(250,250,252,0.9));box-shadow:0 6px 20px rgba(16,24,40,0.08);
-      backdrop-filter: blur(6px);
-    }
+    .topbar{position:fixed;left:var(--gap);right:var(--gap);top:var(--gap);z-index:1000;display:flex;align-items:center;gap:12px;padding:12px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.98),rgba(250,250,252,0.96));box-shadow:0 6px 20px rgba(16,24,40,0.08);backdrop-filter: blur(6px); height:var(--topbar-h);}
     .brand{font-weight:700;font-size:16px;color:#121212;margin-right:6px}
     .controls{display:flex;gap:8px;align-items:center;flex:1}
     .controls > *{background:var(--card);border:1px solid rgba(0,0,0,0.06);padding:8px 10px;border-radius:10px;font-size:14px}
     .controls input[type="text"]{min-width:240px}
-    .small-muted{font-size:13px;color:var(--muted);margin-left:8px}
-
-    /* Place the 3D canvas area at the bottom of the page */
-    #canvas-wrapper{position:fixed;left:12px;right:12px;bottom:12px;height:72%;border-radius:14px;overflow:hidden;box-shadow:0 16px 60px rgba(16,24,40,0.12);background:linear-gradient(180deg,#ffffff,#fbf7fb)}
+    #canvas-wrapper{position:fixed;left:var(--gap);right:var(--gap);top:calc(var(--gap) + var(--topbar-h) + 8px);bottom:var(--gap);border-radius:14px;overflow:hidden;box-shadow:0 16px 60px rgba(16,24,40,0.12);background:linear-gradient(180deg,#ffffff,#fbf7fb)}
     #canvas-container{width:100%;height:100%;display:block}
-
-    /* gallery modal */
     #galleryModal{position:fixed;inset:0;background:rgba(0,0,0,0.7);display:none;align-items:center;justify-content:center;z-index:2000}
     #galleryModal img{max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6)}
-
-    /* Footer hint */
-    .hint{position:fixed;left:12px;bottom:calc(72% + 24px);z-index:1050;color:var(--muted);font-size:13px}
-
-    /* Responsive adjustments */
-    @media (max-width:720px){
-      .controls input[type="text"]{min-width:120px}
-      .topbar{flex-wrap:wrap}
-      #canvas-wrapper{height:60%}
-    }
-
     button.primary{background:linear-gradient(90deg,var(--accent),#ffa6c9);color:white;border:none}
     button.ghost{background:transparent}
+    @media (max-width:720px){ .controls input[type="text"]{min-width:120px} .topbar{flex-wrap:wrap;height:auto;padding:10px} #canvas-wrapper{top:calc(var(--gap) + 120px)} }
   </style>
 
-  <!-- Import map for three module resolution -->
+  <!-- import map so examples/jsm modules that import 'three' resolve correctly -->
   <script type="importmap">
   {
     "imports": {
@@ -60,20 +40,18 @@
     <div class="brand">🎂 Birthday Room — Prototype</div>
     <div class="controls" id="controls">
       <button id="startBtn" class="primary">Start Camera & Mic</button>
-      <button id="uploadPhotoBtn" class="">Upload Photo for Wall</button>
+      <button id="uploadPhotoBtn">Upload Photo for Wall</button>
       <input id="photoInput" type="file" accept="image/*" style="display:none" />
       <button id="resetCake" class="ghost">Reset Cake</button>
 
-      <!-- Peer UI (inline in topbar) -->
       <div id="peerUi" style="display:flex;align-items:center;gap:8px;margin-left:auto">
         <div id="peerIdLabel" style="padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.95);font-weight:600;min-width:180px;text-align:center">Peer: (not ready)</div>
         <input id="callInput" type="text" placeholder="Partner PeerID" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(0,0,0,0.06)" />
         <button id="callBtn">Call</button>
+        <button id="copyShare" title="Copy my PeerID" style="padding:8px 12px;border-radius:8px;background:linear-gradient(90deg,var(--accent),#ffa6c9);color:white;">Copy ID</button>
       </div>
     </div>
   </div>
-
-  <div class="hint">Tip: Click a photo on the wall to view. Blow into mic to extinguish candles.</div>
 
   <div id="canvas-wrapper" aria-live="polite">
     <div id="canvas-container"></div>
@@ -85,118 +63,213 @@
     import * as THREE from 'three';
     import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.156.0/examples/jsm/controls/OrbitControls.js';
 
-    // Basic scene + renderer
+    // Scene setup
     const container = document.getElementById('canvas-container');
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 0.1, 1000);
-    camera.position.set(0,2.2,5);
-    const renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
+    const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 1000);
+    camera.position.set(0, 2.2, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(window.devicePixelRatio||1);
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.shadowMap.enabled = true;
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0,1.4,0);
+    controls.target.set(0, 1.4, 0);
     controls.update();
 
-    // Room
-    const room = new THREE.Mesh(new THREE.BoxGeometry(12,6,10), new THREE.MeshStandardMaterial({color:0xf5f5f5,side:THREE.BackSide}));
-    room.position.y=3; scene.add(room);
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(12,10), new THREE.MeshStandardMaterial({color:0xefe6e6}));
-    floor.rotation.x = -Math.PI/2; floor.receiveShadow=true; floor.position.y=0; scene.add(floor);
-    const hemi = new THREE.HemisphereLight(0xffffee,0x8888ff,0.6); scene.add(hemi);
-    const spot = new THREE.PointLight(0xfff7dd,1.1,20); spot.position.set(0,4,2); scene.add(spot);
+    // Room + floor
+    const room = new THREE.Mesh(new THREE.BoxGeometry(12, 6, 10), new THREE.MeshStandardMaterial({ color: 0xf5f5f5, side: THREE.BackSide }));
+    room.position.y = 3; scene.add(room);
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(12, 10), new THREE.MeshStandardMaterial({ color: 0xefe6e6 }));
+    floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; floor.position.y = 0; scene.add(floor);
+    const hemi = new THREE.HemisphereLight(0xffffee, 0x8888ff, 0.6); scene.add(hemi);
+    const spot = new THREE.PointLight(0xfff7dd, 1.1, 20); spot.position.set(0, 4, 2); scene.add(spot);
 
     // Cake + candles
     const cakeGroup = new THREE.Group();
-    const cakeBody = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.6,32), new THREE.MeshStandardMaterial({color:0xffc0cb}));
-    cakeBody.position.y=0.5; cakeGroup.add(cakeBody);
-    const cakeTop = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.05,32), new THREE.MeshStandardMaterial({color:0xffffff}));
-    cakeTop.position.y=0.8; cakeGroup.add(cakeTop);
-    cakeGroup.position.set(0,0, -1); scene.add(cakeGroup);
+    const cakeBody = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.6, 32), new THREE.MeshStandardMaterial({ color: 0xffc0cb }));
+    cakeBody.position.y = 0.5; cakeGroup.add(cakeBody);
+    const cakeTop = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.05, 32), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+    cakeTop.position.y = 0.8; cakeGroup.add(cakeTop);
+    cakeGroup.position.set(0, 0, -1); scene.add(cakeGroup);
 
-    const candles=[]; const flameSprites=[];
-    function createCandles(){
-      for(let i=0;i<5;i++){
-        const theta = (i/5)*Math.PI*2; const x = Math.cos(theta)*0.5*0.6; const z = Math.sin(theta)*0.5*0.6;
-        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.25,12), new THREE.MeshStandardMaterial({color:0xffffff}));
-        candle.position.set(x,0.95,z-1); scene.add(candle); candles.push(candle);
-        const canvas2 = document.createElement('canvas'); canvas2.width=64; canvas2.height=64; const ctx = canvas2.getContext('2d');
-        const g = ctx.createRadialGradient(32,16,4,32,32,32); g.addColorStop(0,'rgba(255,255,200,1)'); g.addColorStop(0.4,'rgba(255,140,0,0.95)'); g.addColorStop(1,'rgba(255,100,0,0)');
-        ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(32,22,10,16,0,0,Math.PI*2); ctx.fill(); const map = new THREE.CanvasTexture(canvas2);
-        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({map:map,depthWrite:false})); sprite.scale.set(0.18,0.28,1); sprite.position.set(x,1.08,z-1); scene.add(sprite); flameSprites.push(sprite);
+    const candles = [];
+    const flameSprites = [];
+    function createCandles() {
+      for (let i = 0; i < 5; i++) {
+        const theta = (i / 5) * Math.PI * 2;
+        const x = Math.cos(theta) * 0.5 * 0.6;
+        const z = Math.sin(theta) * 0.5 * 0.6;
+        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.25, 12), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+        candle.position.set(x, 0.95, z - 1); scene.add(candle); candles.push(candle);
+
+        const canvas2 = document.createElement('canvas'); canvas2.width = 64; canvas2.height = 64; const ctx = canvas2.getContext('2d');
+        const g = ctx.createRadialGradient(32, 16, 4, 32, 32, 32); g.addColorStop(0, 'rgba(255,255,200,1)'); g.addColorStop(0.4, 'rgba(255,140,0,0.95)'); g.addColorStop(1, 'rgba(255,100,0,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(32, 22, 10, 16, 0, 0, Math.PI * 2); ctx.fill();
+        const map = new THREE.CanvasTexture(canvas2);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: map, depthWrite: false })); sprite.scale.set(0.18, 0.28, 1); sprite.position.set(x, 1.08, z - 1); scene.add(sprite); flameSprites.push(sprite);
       }
     }
     createCandles();
 
-    let candlesLit=true; function extinguishCandles(){ if(!candlesLit) return; candlesLit=false; let t=1; const fade=()=>{ t-=0.06; flameSprites.forEach(s=>s.material.opacity=Math.max(0,t)); if(t>0) requestAnimationFrame(fade); else { flameSprites.forEach(s=>s.visible=false); showHappyText(); startConfetti(); } }; fade(); }
-    function resetCandles(){ candlesLit=true; flameSprites.forEach(s=>{s.visible=true; s.material.opacity=1}); stopConfetti(); hideHappyText(); }
+    let candlesLit = true;
+    function extinguishCandles() {
+      if (!candlesLit) return;
+      candlesLit = false;
+      let t = 1;
+      const fade = () => {
+        t -= 0.06;
+        flameSprites.forEach(s => s.material.opacity = Math.max(0, t));
+        if (t > 0) requestAnimationFrame(fade);
+        else { flameSprites.forEach(s => s.visible = false); showHappyText(); startConfetti(); }
+      };
+      fade();
+    }
+    function resetCandles() { candlesLit = true; flameSprites.forEach(s => { s.visible = true; s.material.opacity = 1 }); stopConfetti(); hideHappyText(); }
 
-    const happyDiv = document.createElement('div'); happyDiv.style.position='absolute'; happyDiv.style.left='50%'; happyDiv.style.top='6%'; happyDiv.style.transform='translateX(-50%)'; happyDiv.style.fontSize='44px'; happyDiv.style.fontWeight='700'; happyDiv.style.color='crimson'; happyDiv.style.textShadow='0 6px 18px rgba(0,0,0,0.25)'; happyDiv.style.display='none'; happyDiv.innerText='HAPPY BIRTHDAY 🎉'; document.getElementById('canvas-wrapper').appendChild(happyDiv);
-    function showHappyText(){ happyDiv.style.display='block'; } function hideHappyText(){ happyDiv.style.display='none'; }
+    const happyDiv = document.createElement('div');
+    happyDiv.style.position = 'absolute'; happyDiv.style.left = '50%'; happyDiv.style.top = '6%'; happyDiv.style.transform = 'translateX(-50%)';
+    happyDiv.style.fontSize = '44px'; happyDiv.style.fontWeight = '700'; happyDiv.style.color = 'crimson'; happyDiv.style.textShadow = '0 6px 18px rgba(0,0,0,0.25)'; happyDiv.style.display = 'none'; happyDiv.innerText = 'HAPPY BIRTHDAY 🎉';
+    document.getElementById('canvas-wrapper').appendChild(happyDiv);
+    function showHappyText() { happyDiv.style.display = 'block'; }
+    function hideHappyText() { happyDiv.style.display = 'none'; }
 
     // Confetti
-    let confettiParticles=null, confettiRunning=false;
-    function startConfetti(){ if(confettiRunning) return; confettiRunning=true; confettiParticles=[]; for(let i=0;i<120;i++){ confettiParticles.push({x:(Math.random()-0.5)*3,y:3.2,z:(Math.random()-0.5)*3,vx:(Math.random()-0.5)*0.06,vy:-0.01-Math.random()*0.03,rot:Math.random()*Math.PI,color:`hsl(${Math.random()*360},70%,60%)`}); } }
-    function stopConfetti(){ confettiRunning=false; confettiParticles=null; }
-    function drawConfetti(){ if(!confettiRunning) return; confettiParticles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.rot+=0.2; if(p.y<0.05) p.y=0.05; const s=0.04; const mat=new THREE.MeshBasicMaterial({color:p.color}); const geo=new THREE.PlaneGeometry(s,s*1.6); const mesh=new THREE.Mesh(geo,mat); mesh.position.set(p.x,p.y,p.z); mesh.rotation.y=p.rot; scene.add(mesh); setTimeout(()=>{ scene.remove(mesh); geo.dispose(); mat.dispose(); },40); }); }
+    let confettiParticles = null, confettiRunning = false;
+    function startConfetti() { if (confettiRunning) return; confettiRunning = true; confettiParticles = []; for (let i = 0; i < 120; i++) { confettiParticles.push({ x: (Math.random() - 0.5) * 3, y: 3.2, z: (Math.random() - 0.5) * 3, vx: (Math.random() - 0.5) * 0.06, vy: -0.01 - Math.random() * 0.03, rot: Math.random() * Math.PI, color: `hsl(${Math.random() * 360},70%,60%)` }); } }
+    function stopConfetti() { confettiRunning = false; confettiParticles = null; }
+    function drawConfetti() { if (!confettiRunning) return; confettiParticles.forEach(p => { p.x += p.vx; p.y += p.vy; p.rot += 0.2; if (p.y < 0.05) p.y = 0.05; const s = 0.04; const mat = new THREE.MeshBasicMaterial({ color: p.color }); const geo = new THREE.PlaneGeometry(s, s * 1.6); const mesh = new THREE.Mesh(geo, mat); mesh.position.set(p.x, p.y, p.z); mesh.rotation.y = p.rot; scene.add(mesh); setTimeout(() => { scene.remove(mesh); geo.dispose(); mat.dispose(); }, 40); }); }
 
     // Video panels
-    const videoEl = document.createElement('video'); videoEl.autoplay=true; videoEl.muted=true; videoEl.playsInline=true;
-    const videoTexture = new THREE.VideoTexture(videoEl); videoTexture.minFilter=THREE.LinearFilter; videoTexture.magFilter=THREE.LinearFilter; videoTexture.format=THREE.RGBAFormat;
-    const leftPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4,1.0), new THREE.MeshBasicMaterial({map:videoTexture})); leftPlane.position.set(-2.8,1.6,-2.2); scene.add(leftPlane);
-    const rightPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4,1.0), new THREE.MeshBasicMaterial({color:0x222222})); rightPlane.position.set(2.8,1.6,-2.2); scene.add(rightPlane);
+    const videoEl = document.createElement('video'); videoEl.autoplay = true; videoEl.muted = true; videoEl.playsInline = true;
+    const videoTexture = new THREE.VideoTexture(videoEl); videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter; videoTexture.format = THREE.RGBAFormat;
+    const leftPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.0), new THREE.MeshBasicMaterial({ map: videoTexture })); leftPlane.position.set(-2.8, 1.6, -2.2); scene.add(leftPlane);
+    const rightPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.0), new THREE.MeshBasicMaterial({ color: 0x222222 })); rightPlane.position.set(2.8, 1.6, -2.2); scene.add(rightPlane);
 
     // Labels
-    const nameTagLeft = document.createElement('div'); nameTagLeft.style.position='fixed'; nameTagLeft.style.left='16px'; nameTagLeft.style.bottom='16px'; nameTagLeft.style.padding='6px 10px'; nameTagLeft.style.borderRadius='12px'; nameTagLeft.style.background='rgba(255,255,255,0.9)'; nameTagLeft.innerText='You'; document.body.appendChild(nameTagLeft);
-    const nameTagRight = document.createElement('div'); nameTagRight.style.position='fixed'; nameTagRight.style.right='16px'; nameTagRight.style.bottom='16px'; nameTagRight.style.padding='6px 10px'; nameTagRight.style.borderRadius='12px'; nameTagRight.style.background='rgba(255,255,255,0.9)'; nameTagRight.innerText='Her (upload photo)'; document.body.appendChild(nameTagRight);
+    const nameTagLeft = document.createElement('div'); nameTagLeft.style.position = 'fixed'; nameTagLeft.style.left = '16px'; nameTagLeft.style.bottom = '16px'; nameTagLeft.style.padding = '6px 10px'; nameTagLeft.style.borderRadius = '12px'; nameTagLeft.style.background = 'rgba(255,255,255,0.9)'; nameTagLeft.innerText = 'You'; document.body.appendChild(nameTagLeft);
+    const nameTagRight = document.createElement('div'); nameTagRight.style.position = 'fixed'; nameTagRight.style.right = '16px'; nameTagRight.style.bottom = '16px'; nameTagRight.style.padding = '6px 10px'; nameTagRight.style.borderRadius = '12px'; nameTagRight.style.background = 'rgba(255,255,255,0.9)'; nameTagRight.innerText = 'Her (upload photo)'; document.body.appendChild(nameTagRight);
 
     // Photo wall
-    const wallPhotos=[]; const raycaster=new THREE.Raycaster(); const mouse=new THREE.Vector2();
-    function createWallPhotos(){ const px=-4.4; const startY=2.4; for(let i=0;i<4;i++){ const geom=new THREE.PlaneGeometry(0.9,0.6); const mat=new THREE.MeshStandardMaterial({color:0xdddddd}); const mesh=new THREE.Mesh(geom,mat); mesh.position.set(px+(i%2)*1.2,startY-Math.floor(i/2)*0.9,-4.9); scene.add(mesh); wallPhotos.push(mesh); } }
+    const wallPhotos = []; const raycaster = new THREE.Raycaster(); const mouse = new THREE.Vector2();
+    function createWallPhotos() { const px = -4.4; const startY = 2.4; for (let i = 0; i < 4; i++) { const geom = new THREE.PlaneGeometry(0.9, 0.6); const mat = new THREE.MeshStandardMaterial({ color: 0xdddddd }); const mesh = new THREE.Mesh(geom, mat); mesh.position.set(px + (i % 2) * 1.2, startY - Math.floor(i / 2) * 0.9, -4.9); scene.add(mesh); wallPhotos.push(mesh); } }
     createWallPhotos();
 
-    const galleryModal=document.getElementById('galleryModal'); const modalImg=document.getElementById('modalImg'); galleryModal.addEventListener('click',()=>{ galleryModal.style.display='none'; modalImg.src=''; });
+    const galleryModal = document.getElementById('galleryModal'); const modalImg = document.getElementById('modalImg'); galleryModal.addEventListener('click', () => { galleryModal.style.display = 'none'; modalImg.src = ''; });
 
-    document.getElementById('uploadPhotoBtn').addEventListener('click',()=> document.getElementById('photoInput').click());
-    document.getElementById('photoInput').addEventListener('change',ev=>{ const f=ev.target.files[0]; if(!f) return; const url=URL.createObjectURL(f); const slot=wallPhotos.find(w=>!w.userData.url); if(!slot){ alert('All wall slots used. Reload to clear.'); return; } slot.userData.url=url; const t=new THREE.TextureLoader().load(url); slot.material.map=t; slot.material.color.set(0xffffff); slot.material.needsUpdate=true; });
+    document.getElementById('uploadPhotoBtn').addEventListener('click', () => document.getElementById('photoInput').click());
+    document.getElementById('photoInput').addEventListener('change', ev => { const f = ev.target.files[0]; if (!f) return; const url = URL.createObjectURL(f); const slot = wallPhotos.find(w => !w.userData.url); if (!slot) { alert('All wall slots used. Reload to clear.'); return; } slot.userData.url = url; const t = new THREE.TextureLoader().load(url); slot.material.map = t; slot.material.color.set(0xffffff); slot.material.needsUpdate = true; });
 
-    renderer.domElement.addEventListener('pointerdown',ev=>{ const rect=renderer.domElement.getBoundingClientRect(); mouse.x=((ev.clientX-rect.left)/rect.width)*2-1; mouse.y=-((ev.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(mouse,camera); const hits=raycaster.intersectObjects(wallPhotos); if(hits.length>0){ const obj=hits[0].object; if(obj.userData.url){ modalImg.src=obj.userData.url; galleryModal.style.display='flex'; } } });
+    renderer.domElement.addEventListener('pointerdown', ev => { const rect = renderer.domElement.getBoundingClientRect(); mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1; mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1; raycaster.setFromCamera(mouse, camera); const hits = raycaster.intersectObjects(wallPhotos); if (hits.length > 0) { const obj = hits[0].object; if (obj.userData.url) { modalImg.src = obj.userData.url; galleryModal.style.display = 'flex'; } } });
 
     // Microphone blow detection (broadband RMS spike)
-    let audioCtx, analyser, micStream; let blowCooldown=false;
-    function startAudioProcessing(stream){ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); micStream=audioCtx.createMediaStreamSource(stream); analyser=audioCtx.createAnalyser(); analyser.fftSize=1024; micStream.connect(analyser); const data=new Uint8Array(analyser.frequencyBinCount); let baseline=0; let history=[]; let lastTrigger=0;
-      function analyze(){ analyser.getByteFrequencyData(data); let sum=0; for(let i=0;i<data.length;i++){ sum += data[i]*data[i]; } const rms = Math.sqrt(sum/data.length); history.push(rms); if(history.length>20) history.shift(); baseline = history.reduce((a,b)=>a+b,0)/history.length; const now=Date.now(); // sensitivity multiplier can be adjusted
-        const sensitivity = 2.6; // medium-high sensitivity
-        if(!blowCooldown && rms > Math.max(18, baseline * sensitivity) && (now - lastTrigger) > 1200){ // require 1.2s cooldown
-          lastTrigger = now; blowCooldown = true; extinguishCandles(); setTimeout(()=>{ blowCooldown=false; }, 2000);
-        }
+    let audioCtx, analyser, micStream; let blowCooldown = false;
+    function startAudioProcessing(stream) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)(); micStream = audioCtx.createMediaStreamSource(stream); analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024; micStream.connect(analyser); const data = new Uint8Array(analyser.frequencyBinCount); let baseline = 0; let history = []; let lastTrigger = 0;
+      function analyze() { analyser.getByteFrequencyData(data); let sum = 0; for (let i = 0; i < data.length; i++) { sum += data[i] * data[i]; } const rms = Math.sqrt(sum / data.length); history.push(rms); if (history.length > 20) history.shift(); baseline = history.reduce((a, b) => a + b, 0) / history.length; const now = Date.now(); const sensitivity = 2.6; if (!blowCooldown && rms > Math.max(18, baseline * sensitivity) && (now - lastTrigger) > 1200) { lastTrigger = now; blowCooldown = true; // trigger local extinguish
+        extinguishCandles(); // also notify peer if connected
+        try { if (dataConn && dataConn.open) { dataConn.send({ type: 'blow' }); } } catch (e) { console.warn('Failed to send blow event', e); }
+        setTimeout(() => { blowCooldown = false; }, 2000);
+      }
       requestAnimationFrame(analyze);
       }
       analyze();
     }
 
     // PeerJS integration
-    let peer = null; let localStream = null; const peerIdLabel = document.getElementById('peerIdLabel'); const callInput = document.getElementById('callInput'); const callBtn = document.getElementById('callBtn'); const remoteVideo = document.createElement('video'); remoteVideo.autoplay=true; remoteVideo.playsInline=true; remoteVideo.muted=false; remoteVideo.style.display='none'; document.body.appendChild(remoteVideo);
+    let peer = null; let localStream = null; let dataConn = null; // PeerJS DataConnection for signaling blow events
+    const peerIdLabel = document.getElementById('peerIdLabel'); const callInput = document.getElementById('callInput'); const callBtn = document.getElementById('callBtn'); const remoteVideo = document.createElement('video'); remoteVideo.autoplay = true; remoteVideo.playsInline = true; remoteVideo.muted = false; remoteVideo.style.display = 'none'; document.body.appendChild(remoteVideo);
 
-    function applyRemoteStreamToRightPlane(videoElem){ try{ videoElem.play().catch(()=>{}); }catch(e){} const remoteTex=new THREE.VideoTexture(videoElem); remoteTex.minFilter=THREE.LinearFilter; remoteTex.magFilter=THREE.LinearFilter; remoteTex.format=THREE.RGBAFormat; rightPlane.material.map=remoteTex; rightPlane.material.needsUpdate=true; nameTagRight.innerText='Her (live)'; }
+    // helper to handle incoming data messages
+    function handleDataMessage(msg) {
+      try {
+        if (!msg) return;
+        if (typeof msg === 'string') {
+          try { msg = JSON.parse(msg); } catch (e) { }
+        }
+        if (msg && msg.type === 'blow') {
+          extinguishCandles();
+        }
+      } catch (e) { console.warn('Data message error', e); }
+    }
 
-    document.getElementById('startBtn').addEventListener('click', async ()=>{
-      try{
-        const stream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
-        videoEl.srcObject = stream; await videoEl.play(); startAudioProcessing(stream); document.getElementById('startBtn').disabled=true; document.getElementById('startBtn').innerText='Camera & Mic Running'; localStream = stream;
-        if(!peer){ const PeerCtor = window.Peer || window.peer || null; if(!PeerCtor){ peerIdLabel.innerText='PeerJS not loaded. Check network/console.'; console.warn('PeerJS not found'); } else { try{ peer = new PeerCtor(); }catch(e){ console.warn('Peer creation failed', e); peerIdLabel.innerText='Peer creation failed'; } if(peer){ peer.on('open', id=>{ peerIdLabel.innerText = 'Your PeerID: ' + id; }); peer.on('error', err=>{ console.warn('Peer error', err); peerIdLabel.innerText = 'Peer error: '+(err && err.message?err.message:err); }); peer.on('disconnected', ()=>{ peerIdLabel.innerText = 'Peer disconnected'; }); peer.on('call', call=>{ console.log('Incoming call from', call.peer); if(localStream) call.answer(localStream); call.on('stream', remoteStream=>{ remoteVideo.srcObject = remoteStream; applyRemoteStreamToRightPlane(remoteVideo); }); }); } } }
-      }catch(e){ alert('Camera/Mic access failed: '+e.message); }
+    function applyRemoteStreamToRightPlane(videoElem) { try { videoElem.play().catch(() => { }); } catch (e) { } const remoteTex = new THREE.VideoTexture(videoElem); remoteTex.minFilter = THREE.LinearFilter; remoteTex.magFilter = THREE.LinearFilter; remoteTex.format = THREE.RGBAFormat; rightPlane.material.map = remoteTex; rightPlane.material.needsUpdate = true; nameTagRight.innerText = 'Her (live)'; }
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        videoEl.srcObject = stream; await videoEl.play(); startAudioProcessing(stream); document.getElementById('startBtn').disabled = true; document.getElementById('startBtn').innerText = 'Camera & Mic Running'; localStream = stream;
+        if (!peer) {
+          const PeerCtor = window.Peer || window.peer || null;
+          if (!PeerCtor) { peerIdLabel.innerText = 'PeerJS not loaded. Check network/console.'; console.warn('PeerJS not found'); }
+          else {
+            try { peer = new PeerCtor(); }
+            catch (e) { console.warn('Peer creation failed', e); peerIdLabel.innerText = 'Peer creation failed'; }
+
+            if (peer) {
+              peer.on('open', id => {
+                peerIdLabel.innerText = 'Your PeerID: ' + id;
+                const copyShareBtn = document.getElementById('copyShare');
+                copyShareBtn.addEventListener('click', async () => {
+                  try { await navigator.clipboard.writeText(id); copyShareBtn.innerText = 'Copied!'; setTimeout(() => copyShareBtn.innerText = 'Copy ID', 1200); } catch (e) { console.warn('Copy failed', e); alert('Copy failed: ' + (e && e.message)); }
+                });
+              });
+
+              peer.on('error', err => { console.warn('Peer error', err); peerIdLabel.innerText = 'Peer error: ' + (err && err.message ? err.message : err); });
+              peer.on('disconnected', () => { peerIdLabel.innerText = 'Peer disconnected'; });
+
+              peer.on('call', call => {
+                console.log('Incoming call from', call.peer);
+                if (localStream) call.answer(localStream);
+                call.on('stream', remoteStream => { remoteVideo.srcObject = remoteStream; applyRemoteStreamToRightPlane(remoteVideo); });
+              });
+
+              peer.on('connection', conn => {
+                console.log('Data connection from', conn.peer);
+                dataConn = conn;
+                dataConn.on('open', () => { console.log('Data channel open with', conn.peer); });
+                dataConn.on('data', d => { handleDataMessage(d); });
+                dataConn.on('close', () => { console.log('Data channel closed'); if (dataConn && dataConn.peer === conn.peer) dataConn = null; });
+              });
+            }
+          }
+        }
+      } catch (e) { alert('Camera/Mic access failed: ' + e.message); }
     });
 
-    callBtn.addEventListener('click', ()=>{ const otherId = callInput.value.trim(); if(!peer) return alert('Start camera and wait for PeerID before calling.'); if(!otherId) return alert('Enter partner PeerID to call.'); if(!localStream) return alert('Local stream not ready.'); try{ const call = peer.call(otherId, localStream); call.on('stream', remoteStream=>{ remoteVideo.srcObject = remoteStream; applyRemoteStreamToRightPlane(remoteVideo); }); call.on('error', e=>{ console.warn('Call error', e); alert('Call error: '+(e && e.message)); }); }catch(e){ console.warn('Failed to place call:', e); alert('Call failed: '+(e && e.message)); } });
+    // prefill from URL if provided
+    (function () { const params = new URLSearchParams(window.location.search); const pre = params.get('callTo'); if (pre) { callInput.value = pre; callInput.focus(); } })();
 
-    document.getElementById('resetCake').addEventListener('click', ()=> resetCandles());
+    callBtn.addEventListener('click', () => {
+      const otherId = callInput.value.trim();
+      if (!peer) return alert('Start camera and wait for PeerID before calling.');
+      if (!otherId) return alert('Enter partner PeerID to call.');
+      if (!localStream) return alert('Local stream not ready.');
 
-    window.addEventListener('resize', ()=>{ const w=container.clientWidth; const h=container.clientHeight; camera.aspect = w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h); });
+      try {
+        const call = peer.call(otherId, localStream);
+        call.on('stream', remoteStream => { remoteVideo.srcObject = remoteStream; applyRemoteStreamToRightPlane(remoteVideo); });
+        call.on('error', e => { console.warn('Call error', e); alert('Call error: ' + (e && e.message)); });
 
-    function animate(){ requestAnimationFrame(animate); if(candlesLit){ flameSprites.forEach((s,i)=>{ s.position.y = 1.06 + Math.sin(Date.now()*0.007 + i)*0.01; s.material.rotation = Math.sin(Date.now()*0.01 + i)*0.3; }); } drawConfetti(); renderer.render(scene,camera); }
+        // also establish data connection for events (if not already)
+        try {
+          if (!dataConn || dataConn.peer !== otherId) {
+            const conn = peer.connect(otherId);
+            dataConn = conn;
+            dataConn.on('open', () => { console.log('Data connection open with', otherId); });
+            dataConn.on('data', d => { handleDataMessage(d); });
+            dataConn.on('close', () => { console.log('Data connection closed'); if (dataConn && dataConn.peer === otherId) dataConn = null; });
+          }
+        } catch (e) { console.warn('Data connection failed', e); }
+      } catch (e) { console.warn('Failed to place call:', e); alert('Call failed: ' + (e && e.message)); }
+    });
+
+    document.getElementById('resetCake').addEventListener('click', () => resetCandles());
+
+    window.addEventListener('resize', () => { const w = container.clientWidth; const h = container.clientHeight; camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h); });
+
+    function animate() { requestAnimationFrame(animate); if (candlesLit) { flameSprites.forEach((s, i) => { s.position.y = 1.06 + Math.sin(Date.now() * 0.007 + i) * 0.01; s.material.rotation = Math.sin(Date.now() * 0.01 + i) * 0.3; }); } drawConfetti(); renderer.render(scene, camera); }
     animate();
   </script>
 </body>
