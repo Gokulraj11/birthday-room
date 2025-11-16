@@ -118,9 +118,9 @@
     // two side-by-side portrait screens on back wall
     let screenW = 2.8, screenH = 3.0, gap = 0.35;
     const localPreview = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ map: videoTexture, toneMapped:false, side:THREE.DoubleSide }));
-    localPreview.position.set(-screenW/2 - gap, 2.2, -4.85); localPreview.rotation.y = Math.PI; scene.add(localPreview);
-    const remoteScreen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ color:0x000000, side:THREE.DoubleSide }));
-    remoteScreen.position.set(screenW/2 + gap, 2.2, -4.85); remoteScreen.rotation.y = Math.PI; scene.add(remoteScreen);
+    localPreview.position.set(-screenW/50 - gap, 2.2, -4.80); localPreview.rotation.y = Math.PI; scene.add(localPreview);
+    // const remoteScreen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ color:0x000000, side:THREE.DoubleSide }));
+    // remoteScreen.position.set(screenW/2 + gap, 2.2, -4.85); remoteScreen.rotation.y = Math.PI; scene.add(remoteScreen);
 
     // name badges
     const nameTagLeft = document.createElement('div'); nameTagLeft.style.position='fixed'; nameTagLeft.style.left='16px'; nameTagLeft.style.bottom='16px'; nameTagLeft.style.padding='6px 10px'; nameTagLeft.style.borderRadius='12px'; nameTagLeft.style.background='rgba(255,255,255,0.9)'; nameTagLeft.innerText='You'; document.body.appendChild(nameTagLeft);
@@ -141,7 +141,7 @@
       let lastTrigger = 0;
       let warmupSamples = 0;
       const WARMUP_REQUIRED = 30; // number of frames to collect baseline (~0.5 - 1s)
-      const MIN_ABSOLUTE = 50; // small absolute floor to ignore tiny noises
+      const MIN_ABSOLUTE = 60; // small absolute floor to ignore tiny noises
       const SUSTAIN_FRAMES = 2; // require spike to appear for N consecutive frames
       let consecSpike = 0;
 
@@ -213,7 +213,7 @@
     let __remoteVideoTexture = null;
     let __remoteVideoPlaying = false;
 
-    // improved applyRemoteStream: auto-resize plane to match incoming video aspect + unmute button
+    // improved applyRemoteStream: auto-resize plane to match incoming video aspect + overlay + unmute button
     function ensureUnmuteButton() {
       if (document.getElementById('unmuteRemoteBtn')) return;
       const b = document.createElement('button');
@@ -232,38 +232,48 @@
     }
 
     function applyRemoteStream(videoElem){
-      // Hide the raw overlay — we want the video to appear only on the 3D plane
+      // Show small raw overlay to verify if stream arrives
       try{
-        videoElem.style.display = 'none';
-        videoElem.muted = true; // keep muted until user explicitly unmutes
         videoElem.playsInline = true;
+        videoElem.style.display = 'block';
+        videoElem.style.position = 'fixed';
+        videoElem.style.right = '12px';
+        videoElem.style.top = '120px';
+        videoElem.style.width = '260px';
+        videoElem.style.height = 'auto';
+        videoElem.style.zIndex = 2001;
       }catch(e){}
 
-      // When metadata arrives, resize the remote 3D plane to match aspect and assign texture
+      // To satisfy autoplay policies: briefly keep remote video muted when attaching stream.
+      // We'll unmute on explicit user click via the Unmute button.
+      try { videoElem.muted = true; ensureUnmuteButton(); } catch(e){}
+
+      // If already playing, leave handlers; else try to play
+      videoElem.addEventListener('playing', ()=>{ __remoteVideoPlaying = true; }, { once: true });
+      videoElem.addEventListener('pause', ()=>{ __remoteVideoPlaying = false; });
+
+      // When the remote video has metadata (width/height) we can size the 3D plane to match aspect
       const onMeta = () => {
         try {
           const vw = videoElem.videoWidth || 1;
           const vh = videoElem.videoHeight || 1;
-          const aspect = vw / vh;
+          const aspect = vw / vh; // width/height
 
-          // Keep the chosen portrait width (screenW) and compute height to preserve aspect
+          // Keep the chosen portrait width and compute height based on aspect
           const desiredWidth = screenW;
           const desiredHeight = desiredWidth / aspect;
 
-          // Replace or update geometry so it exactly matches aspect
+          // Replace geometry so it exactly matches aspect
           if (remoteScreen && remoteScreen.geometry) {
             remoteScreen.geometry.dispose();
             remoteScreen.geometry = new THREE.PlaneGeometry(desiredWidth, desiredHeight);
+            remoteScreen.rotation.y = Math.PI;
           }
 
-          // keep plane facing into room and vertically centered
-          remoteScreen.rotation.y = Math.PI;
-          remoteScreen.position.y = 1.6; // vertical center
-
-          // Dispose previous texture if any
+          // If a previous texture existed, free it
           if (__remoteVideoTexture) { __remoteVideoTexture.dispose(); __remoteVideoTexture = null; }
 
-          // Create and assign VideoTexture
+          // create a fresh VideoTexture and assign it
           __remoteVideoTexture = new THREE.VideoTexture(videoElem);
           __remoteVideoTexture.minFilter = THREE.LinearFilter;
           __remoteVideoTexture.magFilter = THREE.LinearFilter;
@@ -271,44 +281,16 @@
           __remoteVideoTexture.generateMipmaps = false;
           const a2 = renderer.capabilities.getMaxAnisotropy(); if (a2) __remoteVideoTexture.anisotropy = a2;
 
-          // Ensure material can show the video and is not black due to tone mapping or other flags
           remoteScreen.material.map = __remoteVideoTexture;
           remoteScreen.material.needsUpdate = true;
-          remoteScreen.visible = true;
-
           nameTagRight.innerText = 'Her (live)';
-        } catch (err) {
-          console.warn('metadata handler error', err);
-        }
+        } catch (err) { console.warn('metadata handler error', err); }
       };
 
-      // attach metadata handler once
       try { videoElem.removeEventListener('loadedmetadata', onMeta); } catch(e){}
       videoElem.addEventListener('loadedmetadata', onMeta, { once: true });
 
-      // Try to play (muted) so texture receives frames — some browsers require user gesture to unmute later
       try { videoElem.play().catch(()=>{}); } catch(e){}
-
-      // Provide optional unmute control so user can enable audio & unmute the element (counts as a gesture)
-      if (!document.getElementById('unmuteRemoteBtn')) {
-        const b = document.createElement('button');
-        b.id = 'unmuteRemoteBtn';
-        b.innerText = 'Unmute Remote';
-        b.style.position = 'fixed';
-        b.style.top = '80px';
-        b.style.right = '12px';
-        b.style.zIndex = 3000;
-        b.style.padding = '6px 8px';
-        b.style.borderRadius = '8px';
-        b.style.background = 'rgba(0,0,0,0.6)';
-        b.style.color = 'white';
-        b.addEventListener('click', () => {
-          try { videoElem.muted = false; b.remove(); } catch(e){ console.warn(e); }
-        });
-        document.body.appendChild(b);
-      }
-
-      // mark texture for update each frame (animate loop already handles needsUpdate)
     }
 
     async function createPeer(){
