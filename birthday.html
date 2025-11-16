@@ -142,7 +142,7 @@
       let lastTrigger = 0;
       let warmupSamples = 0;
       const WARMUP_REQUIRED = 30; // number of frames to collect baseline (~0.5 - 1s)
-      const MIN_ABSOLUTE = 100; // small absolute floor to ignore tiny noises
+      const MIN_ABSOLUTE = 50; // small absolute floor to ignore tiny noises
       const SUSTAIN_FRAMES = 2; // require spike to appear for N consecutive frames
       let consecSpike = 0;
 
@@ -210,7 +210,32 @@
 
     function handleDataMessage(msg){ try{ if(!msg) return; if(typeof msg === 'string'){ try{ msg = JSON.parse(msg); }catch(e){} } if(msg && msg.type === 'blow'){ extinguishCandles(); } }catch(e){ console.warn('Data message error', e); } }
 
-    function applyRemoteStream(videoElem){ try{ videoElem.play().catch(()=>{}); }catch(e){} const remoteTex = new THREE.VideoTexture(videoElem); remoteTex.minFilter = THREE.LinearFilter; remoteTex.magFilter = THREE.LinearFilter; remoteTex.format = THREE.RGBAFormat; remoteTex.generateMipmaps = false; const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) remoteTex.anisotropy = a2; remoteTex.needsUpdate = true; remoteScreen.material.map = remoteTex; remoteScreen.material.needsUpdate = true; nameTagRight.innerText = 'Her (live)'; }
+    let __remoteVideoTexture = null; let __remoteVideoPlaying = false;
+    function applyRemoteStream(videoElem){
+      // make the raw video visible briefly for debugging and ensure playback
+      try{ videoElem.muted = false; videoElem.playsInline = true; videoElem.style.display = 'block'; videoElem.style.position = 'fixed'; videoElem.style.right = '12px'; videoElem.style.top = '80px'; videoElem.style.width = '240px'; videoElem.style.height = 'auto'; videoElem.style.zIndex = 2001; }catch(e){}
+
+      videoElem.addEventListener('playing', ()=>{ __remoteVideoPlaying = true; }, { once: true });
+      videoElem.addEventListener('pause', ()=>{ __remoteVideoPlaying = false; });
+
+      try{ videoElem.play().catch(()=>{}); }catch(e){}
+
+      // create/update Three.js video texture
+      try{
+        if(__remoteVideoTexture){ __remoteVideoTexture.dispose(); __remoteVideoTexture = null; }
+        __remoteVideoTexture = new THREE.VideoTexture(videoElem);
+        __remoteVideoTexture.minFilter = THREE.LinearFilter;
+        __remoteVideoTexture.magFilter = THREE.LinearFilter;
+        __remoteVideoTexture.format = THREE.RGBAFormat;
+        __remoteVideoTexture.generateMipmaps = false;
+        const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) __remoteVideoTexture.anisotropy = a2;
+
+        remoteScreen.material.map = __remoteVideoTexture;
+        remoteScreen.material.needsUpdate = true;
+        nameTagRight.innerText = 'Her (live)';
+      }catch(e){ console.warn('applyRemoteStream error', e); }
+    }
+
 
     async function createPeer(){
       if(peer) return peer;
@@ -300,7 +325,13 @@
     window.addEventListener('resize', ()=>{ const w = container.clientWidth; const h = container.clientHeight; camera.aspect = w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h); });
 
     // animation loop
-    function animate(){ requestAnimationFrame(animate); if(candlesLit){ flameSprites.forEach((s,i)=>{ s.position.y = 1.06 + Math.sin(Date.now()*0.007 + i) * 0.01; }); } drawConfetti(); renderer.render(scene, camera); }
+    function animate(){
+      requestAnimationFrame(animate);
+      if(candlesLit){ flameSprites.forEach((s,i)=>{ s.position.y = 1.06 + Math.sin(Date.now()*0.007 + i) * 0.01; }); }
+      // update remote video texture if present
+      try{ if(typeof __remoteVideoTexture !== 'undefined' && __remoteVideoTexture) { __remoteVideoTexture.needsUpdate = true; } }catch(e){}
+      drawConfetti(); renderer.render(scene, camera);
+    }
     animate();
   </script>
 </body>
