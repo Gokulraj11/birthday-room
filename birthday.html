@@ -211,47 +211,128 @@
 
     // Single declaration only: remote video texture tracker
     let __remoteVideoTexture = null;
-    let __remoteVideoPlaying = false;
 
     // attach remote stream to 3D plane (no floating DOM preview)
-    function applyRemoteStream(videoElem){
-      // Hide any floating preview and ensure the video element is ready
-      try{ videoElem.style.display = 'none'; videoElem.playsInline = true; videoElem.muted = true; }catch(e){}
+    function applyRemoteStream(videoElem) {
+  try { videoElem.style.display = 'none'; videoElem.playsInline = true; } catch(e){}
 
-      // Always use a fixed-size plane equal to the local preview dimensions
-      try{
-        const fixedW = screenW;
-        const fixedH = screenH;
-        // dispose and recreate geometry to fixed size
-        if(remoteScreen && remoteScreen.geometry){ remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(fixedW, fixedH); }
-        remoteScreen.rotation.y = Math.PI;
-        remoteScreen.position.y = 1.6;
-        remoteScreen.visible = true;
-
-        // dispose previous texture if any
-        if(__remoteVideoTexture){ try{ __remoteVideoTexture.dispose(); }catch(e){} __remoteVideoTexture = null; }
-
-        // create VideoTexture immediately (avoid relying on metadata which may be inconsistent on some browsers)
-        __remoteVideoTexture = new THREE.VideoTexture(videoElem);
-        __remoteVideoTexture.minFilter = THREE.LinearFilter;
-        __remoteVideoTexture.magFilter = THREE.LinearFilter;
-        __remoteVideoTexture.format = THREE.RGBAFormat;
-        __remoteVideoTexture.generateMipmaps = false;
-        const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) __remoteVideoTexture.anisotropy = a2;
-
-        remoteScreen.material.map = __remoteVideoTexture;
-        remoteScreen.material.needsUpdate = true;
-        nameTagRight.innerText = 'Her (live)';
-
-        // attempt play (muted) so frames flow into the texture
-        try{ videoElem.play().catch(()=>{}); }catch(e){}
-
-        // ensure unmute button exists for user gesture if they want audio
-        if(!document.getElementById('unmuteRemoteBtn')){
-          const b = document.createElement('button'); b.id='unmuteRemoteBtn'; b.innerText='Unmute Remote'; b.style.position='fixed'; b.style.top='80px'; b.style.right='12px'; b.style.zIndex=3000; b.style.padding='6px 8px'; b.style.borderRadius='8px'; b.style.background='rgba(0,0,0,0.6)'; b.style.color='white'; b.addEventListener('click', ()=>{ try{ videoElem.muted = false; b.remove(); }catch(e){} }); document.body.appendChild(b);
-        }
-      }catch(err){ console.warn('applyRemoteStream immediate error', err); }
+  // prepare remoteScreen geometry to a fixed size
+  try {
+    const fixedW = screenW, fixedH = screenH;
+    if (remoteScreen && remoteScreen.geometry) {
+      remoteScreen.geometry.dispose();
+      remoteScreen.geometry = new THREE.PlaneGeometry(fixedW, fixedH);
     }
+    remoteScreen.rotation.y = Math.PI;
+    remoteScreen.position.y = 1.6;
+    // hide until texture attached
+    remoteScreen.visible = false;
+  } catch(e) {
+    console.warn('remoteScreen setup failed', e);
+  }
+
+  // Helper: determine if video element is ready to produce frames
+  function videoLooksPlayable(v){
+    try {
+      const hasTracks = !!(v.srcObject && v.srcObject.getTracks && v.srcObject.getTracks().length);
+      return hasTracks && v.readyState > 2 && v.videoWidth > 0 && v.videoHeight > 0;
+    } catch(e) { return false; }
+  }
+
+  // Attach texture (safe) - will create VideoTexture only when called
+  function attachTexture() {
+    try {
+      // final safety check
+      if (!videoLooksPlayable(videoElem)) {
+        console.warn('attachTexture: video not playable yet', { readyState: videoElem.readyState, vw: videoElem.videoWidth, vh: videoElem.videoHeight, tracks: videoElem.srcObject ? videoElem.srcObject.getTracks().length : 0 });
+        return false;
+      }
+
+      // dispose previous texture if any
+      if (window.__remoteVideoTexture) {
+        try { window.__remoteVideoTexture.dispose(); } catch(e){/*ignore*/ }
+        window.__remoteVideoTexture = null;
+      }
+
+      // create VideoTexture safely
+      window.__remoteVideoTexture = new THREE.VideoTexture(videoElem);
+      window.__remoteVideoTexture.minFilter = THREE.LinearFilter;
+      window.__remoteVideoTexture.magFilter = THREE.LinearFilter;
+      window.__remoteVideoTexture.format = THREE.RGBAFormat;
+      window.__remoteVideoTexture.generateMipmaps = false;
+      const an = renderer.capabilities.getMaxAnisotropy();
+      if (an) window.__remoteVideoTexture.anisotropy = an;
+
+      // attach to plane
+      if (remoteScreen && remoteScreen.material) {
+        remoteScreen.material.map = window.__remoteVideoTexture;
+        remoteScreen.material.needsUpdate = true;
+        remoteScreen.visible = true;
+      }
+      nameTagRight && (nameTagRight.innerText = 'Her (live)');
+      console.log('attachTexture: VideoTexture attached (video dims):', videoElem.videoWidth, videoElem.videoHeight);
+      return true;
+    } catch(err) {
+      console.warn('attachTexture failed', err);
+      return false;
+    }
+  }
+
+  // If already playable — attach immediately
+  if (videoLooksPlayable(videoElem)) {
+    try { videoElem.play().catch(()=>{}); } catch(e) {}
+    if (attachTexture()) return;
+  }
+
+  // Wait for events that indicate frames will arrive
+  let attached = false;
+  const onPlayable = () => {
+    if (attached) return;
+    attached = true;
+    // small delay allows a frame to be ready
+    setTimeout(() => { if(!attachTexture()) console.warn('attachTexture still failed after playable event'); }, 80);
+    cleanup();
+  };
+  const cleanup = () => {
+    videoElem.removeEventListener('loadeddata', onPlayable);
+    videoElem.removeEventListener('canplay', onPlayable);
+    videoElem.removeEventListener('playing', onPlayable);
+  };
+
+  videoElem.addEventListener('loadeddata', onPlayable, { once: true });
+  videoElem.addEventListener('canplay', onPlayable, { once: true });
+  videoElem.addEventListener('playing', onPlayable, { once: true });
+
+  // Try to start playing (muted to satisfy autoplay if needed)
+  try {
+    const wasMuted = videoElem.muted;
+    videoElem.muted = true;
+    const p = videoElem.play && videoElem.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(err => {
+        console.warn('video.play() rejected:', err);
+        // fallback: try to attach after a short timeout
+        setTimeout(() => { if(!attached) { attached = true; if(!attachTexture()) console.warn('fallback attach failed'); cleanup(); } }, 1200);
+      });
+    }
+    // restore mute state to what you desire (keep muted if autoplay enforced)
+    videoElem.muted = wasMuted;
+  } catch(e) {
+    console.warn('video.play() threw', e);
+    setTimeout(() => { if(!attached) { attached = true; if(!attachTexture()) console.warn('fallback attach failed'); cleanup(); } }, 1200);
+  }
+
+  // Safety fallback: if no event fired in 2.5s, try attaching anyway
+  setTimeout(() => {
+    if (!attached) {
+      attached = true;
+      console.warn('applyRemoteStream: fallback timeout reached, attempting attach');
+      if(!attachTexture()) console.warn('fallback attach failed (video not playable)');
+      cleanup();
+    }
+  }, 2500);
+}
+
 
     async function createPeer(){
       if(peer) return peer;
