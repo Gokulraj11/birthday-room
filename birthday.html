@@ -215,34 +215,42 @@
 
     // attach remote stream to 3D plane (no floating DOM preview)
     function applyRemoteStream(videoElem){
+      // Hide any floating preview and ensure the video element is ready
       try{ videoElem.style.display = 'none'; videoElem.playsInline = true; videoElem.muted = true; }catch(e){}
 
-      const onMeta = () => {
-        try{
-          const vw = videoElem.videoWidth || 1; const vh = videoElem.videoHeight || 1; const aspect = vw / vh;
-          const desiredWidth = screenW; const desiredHeight = desiredWidth / aspect;
+      // Always use a fixed-size plane equal to the local preview dimensions
+      try{
+        const fixedW = screenW;
+        const fixedH = screenH;
+        // dispose and recreate geometry to fixed size
+        if(remoteScreen && remoteScreen.geometry){ remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(fixedW, fixedH); }
+        remoteScreen.rotation.y = Math.PI;
+        remoteScreen.position.y = 1.6;
+        remoteScreen.visible = true;
 
-          if(remoteScreen && remoteScreen.geometry){ remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(desiredWidth, desiredHeight); }
-          remoteScreen.rotation.y = Math.PI; remoteScreen.position.y = 1.6; remoteScreen.visible = true;
+        // dispose previous texture if any
+        if(__remoteVideoTexture){ try{ __remoteVideoTexture.dispose(); }catch(e){} __remoteVideoTexture = null; }
 
-          if(__remoteVideoTexture){ __remoteVideoTexture.dispose(); __remoteVideoTexture = null; }
-          __remoteVideoTexture = new THREE.VideoTexture(videoElem);
-          __remoteVideoTexture.minFilter = THREE.LinearFilter; __remoteVideoTexture.magFilter = THREE.LinearFilter; __remoteVideoTexture.format = THREE.RGBAFormat; __remoteVideoTexture.generateMipmaps = false;
-          const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) __remoteVideoTexture.anisotropy = a2;
+        // create VideoTexture immediately (avoid relying on metadata which may be inconsistent on some browsers)
+        __remoteVideoTexture = new THREE.VideoTexture(videoElem);
+        __remoteVideoTexture.minFilter = THREE.LinearFilter;
+        __remoteVideoTexture.magFilter = THREE.LinearFilter;
+        __remoteVideoTexture.format = THREE.RGBAFormat;
+        __remoteVideoTexture.generateMipmaps = false;
+        const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) __remoteVideoTexture.anisotropy = a2;
 
-          remoteScreen.material.map = __remoteVideoTexture; remoteScreen.material.needsUpdate = true;
-          nameTagRight.innerText = 'Her (live)';
-        }catch(err){ console.warn('applyRemoteStream meta error', err); }
-      };
+        remoteScreen.material.map = __remoteVideoTexture;
+        remoteScreen.material.needsUpdate = true;
+        nameTagRight.innerText = 'Her (live)';
 
-      try{ videoElem.removeEventListener('loadedmetadata', onMeta); }catch(e){}
-      videoElem.addEventListener('loadedmetadata', onMeta, { once:true });
-      try{ videoElem.play().catch(()=>{}); }catch(e){}
+        // attempt play (muted) so frames flow into the texture
+        try{ videoElem.play().catch(()=>{}); }catch(e){}
 
-      // unmute button for user gesture
-      if(!document.getElementById('unmuteRemoteBtn')){
-        const b = document.createElement('button'); b.id='unmuteRemoteBtn'; b.innerText='Unmute Remote'; b.style.position='fixed'; b.style.top='80px'; b.style.right='12px'; b.style.zIndex=3000; b.style.padding='6px 8px'; b.style.borderRadius='8px'; b.style.background='rgba(0,0,0,0.6)'; b.style.color='white'; b.addEventListener('click', ()=>{ try{ remoteVideo.muted = false; b.remove(); }catch(e){} }); document.body.appendChild(b);
-      }
+        // ensure unmute button exists for user gesture if they want audio
+        if(!document.getElementById('unmuteRemoteBtn')){
+          const b = document.createElement('button'); b.id='unmuteRemoteBtn'; b.innerText='Unmute Remote'; b.style.position='fixed'; b.style.top='80px'; b.style.right='12px'; b.style.zIndex=3000; b.style.padding='6px 8px'; b.style.borderRadius='8px'; b.style.background='rgba(0,0,0,0.6)'; b.style.color='white'; b.addEventListener('click', ()=>{ try{ videoElem.muted = false; b.remove(); }catch(e){} }); document.body.appendChild(b);
+        }
+      }catch(err){ console.warn('applyRemoteStream immediate error', err); }
     }
 
     async function createPeer(){
