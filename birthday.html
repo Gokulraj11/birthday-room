@@ -58,7 +58,7 @@
 
     function dbg(text){ const el = document.getElementById('debug'); if(!el) return; el.style.display='block'; el.innerText = text; }
 
-    // --- basic three setup -------------------------------------------------
+    // --- three setup -------------------------------------------------------
     const container = document.getElementById('canvas-container');
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -71,8 +71,7 @@
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 1.4, 0);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
+    controls.enableDamping = true; controls.dampingFactor = 0.08;
     controls.minDistance = 2.0; controls.maxDistance = 7.0;
     controls.minPolarAngle = Math.PI * 0.15; controls.maxPolarAngle = Math.PI * 0.48;
     function clampTarget(){ const t = controls.target; t.x = Math.max(Math.min(t.x, 4), -4); t.y = Math.max(Math.min(t.y, 2.4), 0.8); t.z = Math.max(Math.min(t.z, 1.5), -3.5); controls.target.set(t.x,t.y,t.z); }
@@ -142,7 +141,7 @@
       let lastTrigger = 0;
       let warmupSamples = 0;
       const WARMUP_REQUIRED = 30; // number of frames to collect baseline (~0.5 - 1s)
-      const MIN_ABSOLUTE = 50; // small absolute floor to ignore tiny noises
+      const MIN_ABSOLUTE = 60; // small absolute floor to ignore tiny noises
       const SUSTAIN_FRAMES = 2; // require spike to appear for N consecutive frames
       let consecSpike = 0;
 
@@ -210,40 +209,95 @@
 
     function handleDataMessage(msg){ try{ if(!msg) return; if(typeof msg === 'string'){ try{ msg = JSON.parse(msg); }catch(e){} } if(msg && msg.type === 'blow'){ extinguishCandles(); } }catch(e){ console.warn('Data message error', e); } }
 
-    let __remoteVideoTexture = null; let __remoteVideoPlaying = false;
-    function applyRemoteStream(videoElem){
-      // make the raw video visible briefly for debugging and ensure playback
-      try{ videoElem.muted = false; videoElem.playsInline = true; videoElem.style.display = 'block'; videoElem.style.position = 'fixed'; videoElem.style.right = '12px'; videoElem.style.top = '80px'; videoElem.style.width = '240px'; videoElem.style.height = 'auto'; videoElem.style.zIndex = 2001; }catch(e){}
+    // Single declaration only: remote video texture tracker
+    let __remoteVideoTexture = null;
+    let __remoteVideoPlaying = false;
 
+    // improved applyRemoteStream: auto-resize plane to match incoming video aspect + overlay + unmute button
+    function ensureUnmuteButton() {
+      if (document.getElementById('unmuteRemoteBtn')) return;
+      const b = document.createElement('button');
+      b.id = 'unmuteRemoteBtn';
+      b.innerText = 'Unmute Remote';
+      b.style.position = 'fixed';
+      b.style.top = '80px';
+      b.style.right = '12px';
+      b.style.zIndex = 3000;
+      b.style.padding = '6px 8px';
+      b.style.borderRadius = '8px';
+      b.style.background = 'rgba(0,0,0,0.6)';
+      b.style.color = 'white';
+      b.addEventListener('click', () => { try { remoteVideo.muted = false; b.remove(); } catch(e){ console.warn(e); } });
+      document.body.appendChild(b);
+    }
+
+    function applyRemoteStream(videoElem){
+      // Show small raw overlay to verify if stream arrives
+      try{
+        videoElem.playsInline = true;
+        videoElem.style.display = 'block';
+        videoElem.style.position = 'fixed';
+        videoElem.style.right = '12px';
+        videoElem.style.top = '120px';
+        videoElem.style.width = '260px';
+        videoElem.style.height = 'auto';
+        videoElem.style.zIndex = 2001;
+      }catch(e){}
+
+      // To satisfy autoplay policies: briefly keep remote video muted when attaching stream.
+      // We'll unmute on explicit user click via the Unmute button.
+      try { videoElem.muted = true; ensureUnmuteButton(); } catch(e){}
+
+      // If already playing, leave handlers; else try to play
       videoElem.addEventListener('playing', ()=>{ __remoteVideoPlaying = true; }, { once: true });
       videoElem.addEventListener('pause', ()=>{ __remoteVideoPlaying = false; });
 
-      try{ videoElem.play().catch(()=>{}); }catch(e){}
+      // When the remote video has metadata (width/height) we can size the 3D plane to match aspect
+      const onMeta = () => {
+        try {
+          const vw = videoElem.videoWidth || 1;
+          const vh = videoElem.videoHeight || 1;
+          const aspect = vw / vh; // width/height
 
-      // create/update Three.js video texture
-      try{
-        if(__remoteVideoTexture){ __remoteVideoTexture.dispose(); __remoteVideoTexture = null; }
-        __remoteVideoTexture = new THREE.VideoTexture(videoElem);
-        __remoteVideoTexture.minFilter = THREE.LinearFilter;
-        __remoteVideoTexture.magFilter = THREE.LinearFilter;
-        __remoteVideoTexture.format = THREE.RGBAFormat;
-        __remoteVideoTexture.generateMipmaps = false;
-        const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) __remoteVideoTexture.anisotropy = a2;
+          // Keep the chosen portrait width and compute height based on aspect
+          const desiredWidth = screenW;
+          const desiredHeight = desiredWidth / aspect;
 
-        remoteScreen.material.map = __remoteVideoTexture;
-        remoteScreen.material.needsUpdate = true;
-        nameTagRight.innerText = 'Her (live)';
-      }catch(e){ console.warn('applyRemoteStream error', e); }
+          // Replace geometry so it exactly matches aspect
+          if (remoteScreen && remoteScreen.geometry) {
+            remoteScreen.geometry.dispose();
+            remoteScreen.geometry = new THREE.PlaneGeometry(desiredWidth, desiredHeight);
+            remoteScreen.rotation.y = Math.PI;
+          }
+
+          // If a previous texture existed, free it
+          if (__remoteVideoTexture) { __remoteVideoTexture.dispose(); __remoteVideoTexture = null; }
+
+          // create a fresh VideoTexture and assign it
+          __remoteVideoTexture = new THREE.VideoTexture(videoElem);
+          __remoteVideoTexture.minFilter = THREE.LinearFilter;
+          __remoteVideoTexture.magFilter = THREE.LinearFilter;
+          __remoteVideoTexture.format = THREE.RGBAFormat;
+          __remoteVideoTexture.generateMipmaps = false;
+          const a2 = renderer.capabilities.getMaxAnisotropy(); if (a2) __remoteVideoTexture.anisotropy = a2;
+
+          remoteScreen.material.map = __remoteVideoTexture;
+          remoteScreen.material.needsUpdate = true;
+          nameTagRight.innerText = 'Her (live)';
+        } catch (err) { console.warn('metadata handler error', err); }
+      };
+
+      try { videoElem.removeEventListener('loadedmetadata', onMeta); } catch(e){}
+      videoElem.addEventListener('loadedmetadata', onMeta, { once: true });
+
+      try { videoElem.play().catch(()=>{}); } catch(e){}
     }
-
 
     async function createPeer(){
       if(peer) return peer;
       const PeerCtor = window.Peer || window.peer || null;
       if(!PeerCtor){ peerIdLabel.innerText = 'PeerJS not loaded'; console.warn('PeerJS missing'); return null; }
-      try{
-        peer = new PeerCtor();
-      }catch(e){ console.warn('Peer creation failed', e); peerIdLabel.innerText = 'Peer init failed'; return null; }
+      try{ peer = new PeerCtor(); }catch(e){ console.warn('Peer creation failed', e); peerIdLabel.innerText = 'Peer init failed'; return null; }
 
       peer.on('open', id => {
         peerIdLabel.innerText = 'Your PeerID: ' + id;
