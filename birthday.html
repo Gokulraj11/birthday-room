@@ -36,6 +36,7 @@
     <div class="controls" id="controls">
       <button id="startBtn" class="primary">Start Camera &amp; Mic</button>
       <button id="resetCake" class="ghost">Reset Cake</button>
+      <button id="forceLowBtn" class="ghost" title="Force low-res">Force Low-Res</button>
 
       <div id="peerUi" style="display:flex;align-items:center;gap:8px;margin-left:auto">
         <div id="peerIdLabel" style="padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.95);font-weight:600;min-width:180px;text-align:center">Peer: (not ready)</div>
@@ -178,7 +179,11 @@
     }
 
     // --- PeerJS integration --------------------------------------------------
-    let peer = null, localStream = null, dataConn = null, currentCall = null, lowLatencyMode = false;
+    let peer = null, localStream = null, dataConn = null, currentCall = null;
+    let autoLowEnabled = true; // we will auto downgrade when network poor
+    let autoLowState = false; // currently in auto-low state
+    let monitorInterval = null;
+
     window._br_state = { peerRef: () => peer, currentCallRef: () => currentCall };
 
     const peerIdLabel = document.getElementById('peerIdLabel'); const callInput = document.getElementById('callInput'); const callBtn = document.getElementById('callBtn');
@@ -188,7 +193,7 @@
 
     window.__remoteVideoTexture = null;
 
-    // Preferred media constraints (high quality)
+    // Preferred media constraints (high quality) and low quality
     const HIGH_CONSTRAINTS = { video: { width: { ideal: 1280, min: 640 }, height: { ideal: 720 }, aspectRatio: 16/9, frameRate: { ideal: 30 } }, audio: true };
     const LOW_CONSTRAINTS = { video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 15 } }, audio: true };
 
@@ -203,141 +208,120 @@
       }
     }
 
-    // Robust applyRemoteStream: wait for frames, handle AbortError, avoid creating texture too early
+    // Replace outbound tracks on currentCall.peerConnection safely
+    async function replaceOutgoingTracksWithStream(stream) {
+      if (!currentCall || !currentCall.peerConnection) {
+        // just update local preview
+        videoEl.srcObject = stream; localStream = stream; return;
+      }
+      try {
+        const senders = currentCall.peerConnection.getSenders();
+        const vTrack = stream.getVideoTracks()[0];
+        const aTrack = stream.getAudioTracks()[0];
+        for (const s of senders) {
+          try {
+            if (s.track && s.track.kind === 'video' && vTrack) await s.replaceTrack(vTrack);
+            if (s.track && s.track.kind === 'audio' && aTrack) await s.replaceTrack(aTrack);
+          } catch (e) { console.warn('replaceTrack failed for sender', e); }
+        }
+        videoEl.srcObject = stream; localStream = stream;
+      } catch (err) { console.warn('replaceOutgoingTracksWithStream failed', err); }
+    }
+
+    // Network monitor: checks inbound-rtp bytesReceived for video receiver and downgrades if low
+    let monitorState = { lastBytes: 0, lastTs: 0, lowConsecutive: 0 };
+    function startMonitorForCall(call) {
+      stopMonitor();
+      if (!call || !call.peerConnection) return;
+      monitorState = { lastBytes: 0, lastTs: 0, lowConsecutive: 0 };
+      monitorInterval = setInterval(async () => {
+        try {
+          const pc = call.peerConnection;
+          const stats = await pc.getStats();
+          let inboundVideo = null;
+          stats.forEach(report => {
+            if (report.type === 'inbound-rtp' && report.kind === 'video') inboundVideo = report;
+            // firefox sometimes reports as 'inbound-rtp' without kind, check mediaType
+            if (!inboundVideo && report.type === 'inbound-rtp' && report.mediaType === 'video') inboundVideo = report;
+          });
+
+          if (!inboundVideo) {
+            // fallback: try to find track stats or remote-inbound-rtp
+            stats.forEach(report => { if (!inboundVideo && (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') && (report.kind === 'video' || report.mediaType === 'video')) inboundVideo = report; });
+          }
+
+          if (inboundVideo && inboundVideo.bytesReceived !== undefined) {
+            const now = Date.now();
+            if (monitorState.lastTs) {
+              const deltaBytes = inboundVideo.bytesReceived - monitorState.lastBytes;
+              const deltaMs = now - monitorState.lastTs;
+              const kbps = (deltaBytes * 8) / (deltaMs); // kbps as kilobits per ms? we'll compare scaled
+              // convert to kbps (kilobits per second)
+              const approxKbps = (deltaBytes * 8) / (deltaMs / 1000);
+              // decide threshold (150 kbps)
+              if (approxKbps < 150) {
+                monitorState.lowConsecutive++;
+              } else {
+                monitorState.lowConsecutive = Math.max(0, monitorState.lowConsecutive - 1);
+                if (autoLowState) {
+                  // network recovered, restore high if user didn't force low
+                  autoLowState = false; console.log('Network recovered (kbps=', Math.round(approxKbps), '). Restoring high quality.');
+                  const h = await getPreferredStream(false).catch(()=>null);
+                  if (h) await replaceOutgoingTracksWithStream(h).catch(()=>{});
+                }
+              }
+
+              if (!autoLowState && monitorState.lowConsecutive >= 2 && autoLowEnabled) {
+                // downgrade
+                console.log('Detected low inbound bitrate (approx kbps=', Math.round(approxKbps), '). Downgrading to low-res.');
+                autoLowState = true; // mark auto low engaged
+                const low = await getPreferredStream(true).catch(()=>null);
+                if (low) await replaceOutgoingTracksWithStream(low).catch(()=>{});
+              }
+            }
+            monitorState.lastBytes = inboundVideo.bytesReceived; monitorState.lastTs = Date.now();
+          }
+        } catch (e) { console.warn('monitor error', e); }
+      }, 3000);
+    }
+    function stopMonitor(){ if (monitorInterval) { clearInterval(monitorInterval); monitorInterval = null; } }
+
+    // Robust applyRemoteStream: simplified to attach once playable and show fixed remoteScreen
     function applyRemoteStream(videoElem) {
       try { videoElem.style.display = 'none'; videoElem.playsInline = true; } catch(e){}
-      try {
-        const fixedW = screenW, fixedH = screenH;
-        if (remoteScreen && remoteScreen.geometry) { remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(fixedW, fixedH); }
-        remoteScreen.rotation.y = Math.PI;
-        remoteScreen.position.y = 1.6;
-        remoteScreen.visible = false;
-      } catch(e) { console.warn('remoteScreen setup failed', e); }
+      try { if (remoteScreen && remoteScreen.geometry) { remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(screenW, screenH); }} catch(e){}
+      remoteScreen.rotation.y = Math.PI; remoteScreen.position.y = 1.6; remoteScreen.visible = false;
 
-      function videoLooksPlayable(v){
-        try { const hasTracks = !!(v.srcObject && v.srcObject.getTracks && v.srcObject.getTracks().length); return hasTracks && v.readyState > 2 && v.videoWidth > 0 && v.videoHeight > 0; } catch(e) { return false; }
-      }
-
-      function attachTexture() {
+      function attachIfReady() {
+        if (!videoElem || !videoElem.srcObject) return false;
+        if (videoElem.readyState <= 2 || videoElem.videoWidth === 0) return false;
         try {
-          if (!videoLooksPlayable(videoElem)) {
-            console.warn('attachTexture: video not playable yet', { readyState: videoElem.readyState, vw: videoElem.videoWidth, vh: videoElem.videoHeight, tracks: videoElem.srcObject ? videoElem.srcObject.getTracks().length : 0 });
-            return false;
-          }
           if (window.__remoteVideoTexture) { try { window.__remoteVideoTexture.dispose(); } catch(e){} window.__remoteVideoTexture = null; }
           window.__remoteVideoTexture = new THREE.VideoTexture(videoElem);
-          window.__remoteVideoTexture.minFilter = THREE.LinearFilter;
-          window.__remoteVideoTexture.magFilter = THREE.LinearFilter;
-          window.__remoteVideoTexture.format = THREE.RGBAFormat;
-          window.__remoteVideoTexture.generateMipmaps = false;
+          window.__remoteVideoTexture.minFilter = THREE.LinearFilter; window.__remoteVideoTexture.magFilter = THREE.LinearFilter; window.__remoteVideoTexture.format = THREE.RGBAFormat; window.__remoteVideoTexture.generateMipmaps = false;
           const an = renderer.capabilities.getMaxAnisotropy(); if (an) window.__remoteVideoTexture.anisotropy = an;
-          if (remoteScreen && remoteScreen.material) { remoteScreen.material.map = window.__remoteVideoTexture; remoteScreen.material.needsUpdate = true; remoteScreen.visible = true; }
+          remoteScreen.material.map = window.__remoteVideoTexture; remoteScreen.material.needsUpdate = true; remoteScreen.visible = true;
           if (nameTagRight) nameTagRight.innerText = 'Her (live)';
           console.log('attachTexture: VideoTexture attached (dims)', videoElem.videoWidth, videoElem.videoHeight);
           return true;
-        } catch(err) { console.warn('attachTexture failed', err); return false; }
+        } catch (err) { console.warn('attach failed', err); return false; }
       }
 
-      // retry-safe play wrapper
-      let playAttempts = 0;
-      async function tryPlayUntilPlayable(maxAttempts = 6, delayMs = 300) {
-        playAttempts++;
-        try {
-          await videoElem.play();
-          return true;
-        } catch (err) {
-          const isAbort = err && (err.name === 'AbortError' || /abort/i.test(String(err)));
-          const isNotAllowed = err && (err.name === 'NotAllowedError' || /not allowed/i.test(String(err)));
-          console.warn(`video.play() attempt ${playAttempts} rejected:`, err && err.name ? err.name : err, isAbort ? '(Abort)' : '', isNotAllowed ? '(NotAllowed/autoplay policy)' : '');
-          if (isNotAllowed) return false;
-          if (playAttempts < maxAttempts) {
-            await new Promise(r => setTimeout(r, delayMs));
-            return tryPlayUntilPlayable(maxAttempts, delayMs);
-          }
-          return false;
-        }
-      }
+      const onPlayable = () => { try { videoElem.muted = true; } catch(e){}; attachIfReady(); cleanup(); };
+      const cleanup = () => { videoElem.removeEventListener('loadeddata', onPlayable); videoElem.removeEventListener('canplay', onPlayable); videoElem.removeEventListener('playing', onPlayable); };
+      videoElem.addEventListener('loadeddata', onPlayable, { once: true }); videoElem.addEventListener('canplay', onPlayable, { once: true }); videoElem.addEventListener('playing', onPlayable, { once: true });
 
-      if (videoLooksPlayable(videoElem)) {
-        try { if (videoElem.muted !== true) videoElem.muted = true; tryPlayUntilPlayable().then(() => attachTexture()); return; } catch(e) { console.warn('immediate playable attach error', e); }
-      }
+      // try immediate attach as well
+      setTimeout(()=>{ if (!attachIfReady()) { try { videoElem.play().catch(()=>{}); } catch(e){} } }, 80);
 
-      let attached = false;
-      const onPlayable = () => {
-        if (attached) return;
-        attached = true;
-        setTimeout(() => {
-          try { if (videoElem.muted !== true) videoElem.muted = true; } catch(e){}
-          tryPlayUntilPlayable().then(_ => {
-            if (!attachTexture()) console.warn('onPlayable: attachTexture returned false (video still not ready)');
-          });
-        }, 80);
-        cleanup();
-      };
-      const cleanup = () => {
-        videoElem.removeEventListener('loadeddata', onPlayable);
-        videoElem.removeEventListener('canplay', onPlayable);
-        videoElem.removeEventListener('playing', onPlayable);
-      };
-
-      videoElem.addEventListener('loadeddata', onPlayable, { once: true });
-      videoElem.addEventListener('canplay', onPlayable, { once: true });
-      videoElem.addEventListener('playing', onPlayable, { once: true });
-
-      try {
-        const prevMuted = videoElem.muted;
-        videoElem.muted = true;
-        const p = videoElem.play && videoElem.play();
-        if (p && typeof p.catch === 'function') {
-          p.catch(err => {
-            console.warn('initial video.play() rejected (caught), will attempt retries via tryPlayUntilPlayable', err && err.name ? err.name : err);
-          });
-        }
-      } catch(e) { console.warn('video.play() thrown', e); }
-
-      setTimeout(() => {
-        if (!attached) {
-          attached = true;
-          console.warn('applyRemoteStream: fallback timeout reached, attempting attach');
-          tryPlayUntilPlayable(2, 300).then(() => {
-            if (!attachTexture()) console.warn('fallback attach failed (video not playable)');
-          });
-          cleanup();
-        }
-      }, 3000);
+      // fallback timeout
+      setTimeout(()=>{ if (!attachIfReady()) { console.warn('applyRemoteStream: frames not ready after timeout'); try { videoElem.play().catch(()=>{}); } catch(e){} } }, 4000);
     }
 
-    // helper: attach remote stream and ensure frames arrive; if not, attempt a single re-call
     async function handleIncomingRemoteStream(remoteStream, callerPeerId) {
       try { remoteVideo.srcObject = remoteStream; } catch (e) { console.warn('attach srcObject failed', e); }
       applyRemoteStream(remoteVideo);
-
-      const MAX_TOTAL_WAIT = 8000; const PLAY_RETRY_INTERVAL = 350; const STABLE_REQUIRED = 2; // increased timeout
-      let stable = 0; const start = Date.now();
-      async function tryPlayOnce() { try { await remoteVideo.play(); return true; } catch (err) { return false; } }
-
-      while (Date.now() - start < MAX_TOTAL_WAIT) {
-        if (remoteVideo.videoWidth > 0 && remoteVideo.videoHeight > 0 && remoteVideo.readyState > 2) { stable++; if (stable >= STABLE_REQUIRED) { console.log('Remote video playable: ', remoteVideo.videoWidth, 'x', remoteVideo.videoHeight); return true; } } else { stable = 0; }
-        await tryPlayOnce().catch(()=>{});
-        await new Promise(r => setTimeout(r, PLAY_RETRY_INTERVAL));
-      }
-
-      console.warn('Remote frames did not arrive within timeout. Attempting one re-call for', callerPeerId);
-      try {
-        if (currentCall && typeof currentCall.close === 'function') { try { currentCall.close(); } catch(e) { console.warn('error closing currentCall', e); } currentCall = null; }
-        if (!dataConn || dataConn.peer !== callerPeerId) { try { dataConn = peer.connect(callerPeerId); } catch(e){ console.warn('dataConn reconnect failed', e); } }
-        if (peer && callerPeerId && localStream) {
-          const newCall = peer.call(callerPeerId, localStream);
-          currentCall = newCall;
-          newCall.on('stream', s => { remoteVideo.srcObject = s; applyRemoteStream(remoteVideo); handleIncomingRemoteStream(s, callerPeerId); });
-          newCall.on('error', e => console.warn('re-call error', e));
-          await new Promise(r => setTimeout(r, 3500));
-          if (remoteVideo.videoWidth > 0) { console.log('Re-call succeeded, frames arrived.'); return true; } else { console.warn('Re-call did not produce frames.'); }
-        }
-      } catch (err) { console.warn('re-call attempt failed', err); }
-
-      console.warn('Final: remoteVideo state', { readyState: remoteVideo.readyState, videoWidth: remoteVideo.videoWidth, videoHeight: remoteVideo.videoHeight, tracks: remoteVideo.srcObject ? remoteVideo.srcObject.getTracks().map(t=>({kind:t.kind,enabled:t.enabled,readyState:t.readyState})) : null, peerExists: !!window.peer, currentCallExists: !!window.currentCall });
-      return false;
+      if (currentCall) startMonitorForCall(currentCall);
     }
 
     // createPeer helper (PeerJS)
@@ -353,13 +337,11 @@
         if (copyBtn) copyBtn.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(id); copyBtn.innerText = 'Copied!'; setTimeout(()=>copyBtn.innerText='Copy ID',1200); }catch(e){ console.warn('Copy failed', e); } });
       });
 
-      // handle incoming call — ensure we have a high-res local stream before answering
       async function handleCallAsync(call) {
         currentCall = call; window._br_state.currentCall = currentCall;
         console.log('Incoming call from', call.peer);
         try {
           if (!localStream) {
-            // request preferred high-res stream before answering
             try { const s = await getPreferredStream(false); localStream = s; videoEl.srcObject = s; await videoEl.play().catch(()=>{}); startAudioProcessing(s); if (startBtn) { startBtn.disabled = true; startBtn.innerText = 'Camera & Mic Running'; } }
             catch(e) { console.warn('Failed to get local stream before answering', e); }
           }
@@ -367,7 +349,7 @@
 
         if (localStream) call.answer(localStream);
         call.on('stream', remoteStream => { handleIncomingRemoteStream(remoteStream, call.peer); });
-        call.on('close', ()=>{ if (currentCall === call) currentCall = null; });
+        call.on('close', ()=>{ if (currentCall === call) currentCall = null; stopMonitor(); });
       }
 
       peer.on('call', call => { handleCallAsync(call); });
@@ -383,23 +365,6 @@
       peer.on('error', err => { console.warn('Peer error', err); peerIdLabel.innerText = 'Peer error'; });
       peer.on('disconnected', ()=>{ peerIdLabel.innerText = 'Peer disconnected'; });
       return peer;
-    }
-
-    // low/high latency helpers (replace tracks)
-    async function switchToLowLatency(){
-      try{
-        const low = await getPreferredStream(true);
-        if(currentCall && currentCall.peerConnection){ const senders = currentCall.peerConnection.getSenders(); const v = low.getVideoTracks()[0]; const a = low.getAudioTracks()[0]; senders.forEach(s => { try{ if(s.track && s.track.kind==='video' && v) s.replaceTrack(v); if(s.track && s.track.kind==='audio' && a) s.replaceTrack(a); }catch(e){} }); }
-        videoEl.srcObject = low; localStream = low; return true;
-      }catch(e){ console.warn('Low-latency failed', e); return false; }
-    }
-
-    async function restoreHighLatency(){
-      try{
-        const high = await getPreferredStream(false);
-        if(currentCall && currentCall.peerConnection){ const senders = currentCall.peerConnection.getSenders(); const v = high.getVideoTracks()[0]; const a = high.getAudioTracks()[0]; senders.forEach(s => { try{ if(s.track && s.track.kind==='video' && v) s.replaceTrack(v); if(s.track && s.track.kind==='audio' && a) s.replaceTrack(a); }catch(e){} }); }
-        videoEl.srcObject = high; localStream = high; return true;
-      }catch(e){ console.warn('Restore high failed', e); return false; }
     }
 
     // wire start button
@@ -426,12 +391,22 @@
         const call = peer.call(otherId, localStream);
         currentCall = call; window._br_state.currentCall = currentCall;
         call.on('stream', remoteStream => { handleIncomingRemoteStream(remoteStream, call.peer); });
-        call.on('close', ()=>{ if (currentCall === call) currentCall = null; });
+        call.on('close', ()=>{ if (currentCall === call) currentCall = null; stopMonitor(); });
         if (!dataConn || dataConn.peer !== otherId) {
           const conn = peer.connect(otherId);
           dataConn = conn; dataConn.on('open', ()=>{}); dataConn.on('data', d => handleDataMessage(d)); dataConn.on('close', ()=>{ if (dataConn && dataConn.peer === otherId) dataConn = null; });
         }
       } catch(e) { console.warn('Call failed', e); alert('Call failed: ' + (e && e.message)); }
+    });
+
+    // force low button
+    const forceLowBtn = document.getElementById('forceLowBtn');
+    if (forceLowBtn) forceLowBtn.addEventListener('click', async ()=>{
+      autoLowEnabled = false;
+      autoLowState = true;
+      forceLowBtn.innerText = 'Low Forced';
+      const low = await getPreferredStream(true).catch(()=>null);
+      if (low) await replaceOutgoingTracksWithStream(low).catch(()=>{});
     });
 
     // reset cake
@@ -453,7 +428,8 @@
     window.__br_debug = {
       listVideos: () => Array.from(document.querySelectorAll('video')).map((v,i)=>({idx:i, readyState:v.readyState, width:v.videoWidth, height:v.videoHeight, paused:v.paused, muted:v.muted, tracks: v.srcObject ? v.srcObject.getTracks().map(t=>({kind:t.kind,enabled:t.enabled})) : null})),
       hasRemoteTexture: () => !!window.__remoteVideoTexture,
-      showDebug: (msg) => dbg(msg)
+      showDebug: (msg) => dbg(msg),
+      stopMonitor: () => stopMonitor()
     };
   </script>
 </body>
