@@ -120,7 +120,7 @@
     const localPreview = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ map: videoTexture, toneMapped:false, side:THREE.DoubleSide }));
     localPreview.position.set(-screenW/2 - gap, 1.6, -4.85); localPreview.rotation.y = Math.PI; scene.add(localPreview);
     const remoteScreen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ color:0x000000, side:THREE.DoubleSide }));
-    remoteScreen.position.set(screenW/2 + gap, 1.6, -4.85); remoteScreen.rotation.y = Math.PI; scene.add(remoteScreen);
+    remoteScreen.position.set(screenW/2 + gap, 1.6, -4.85); remoteScreen.rotation.y = Math.PI; remoteScreen.visible = false; scene.add(remoteScreen);
 
     // name badges
     const nameTagLeft = document.createElement('div'); nameTagLeft.style.position='fixed'; nameTagLeft.style.left='16px'; nameTagLeft.style.bottom='16px'; nameTagLeft.style.padding='6px 10px'; nameTagLeft.style.borderRadius='12px'; nameTagLeft.style.background='rgba(255,255,255,0.9)'; nameTagLeft.innerText='You'; document.body.appendChild(nameTagLeft);
@@ -205,7 +205,7 @@
     let peer = null, localStream = null, dataConn = null, currentCall = null, lowLatencyMode = false;
     const peerIdLabel = document.getElementById('peerIdLabel'); const callInput = document.getElementById('callInput'); const callBtn = document.getElementById('callBtn');
 
-    const remoteVideo = document.createElement('video'); remoteVideo.autoplay = true; remoteVideo.playsInline = true; remoteVideo.muted = false; remoteVideo.style.display = 'none'; document.body.appendChild(remoteVideo);
+    const remoteVideo = document.createElement('video'); remoteVideo.autoplay = true; remoteVideo.playsInline = true; remoteVideo.muted = true; remoteVideo.style.display = 'none'; document.body.appendChild(remoteVideo);
 
     function handleDataMessage(msg){ try{ if(!msg) return; if(typeof msg === 'string'){ try{ msg = JSON.parse(msg); }catch(e){} } if(msg && msg.type === 'blow'){ extinguishCandles(); } }catch(e){ console.warn('Data message error', e); } }
 
@@ -213,41 +213,24 @@
     let __remoteVideoTexture = null;
     let __remoteVideoPlaying = false;
 
-    function ensureUnmuteButton() {
-      if (document.getElementById('unmuteRemoteBtn')) return;
-      const b = document.createElement('button');
-      b.id = 'unmuteRemoteBtn';
-      b.innerText = 'Unmute Remote';
-      b.style.position = 'fixed';
-      b.style.top = '80px';
-      b.style.right = '12px';
-      b.style.zIndex = 3000;
-      b.style.padding = '6px 8px';
-      b.style.borderRadius = '8px';
-      b.style.background = 'rgba(0,0,0,0.6)';
-      b.style.color = 'white';
-      b.addEventListener('click', () => { try { remoteVideo.muted = false; b.remove(); } catch(e){ console.warn(e); } });
-      document.body.appendChild(b);
-    }
-
+    // attach remote stream to 3D plane (no floating DOM preview)
     function applyRemoteStream(videoElem){
-      // Hide floating preview and attach video to remoteScreen plane
       try{ videoElem.style.display = 'none'; videoElem.playsInline = true; videoElem.muted = true; }catch(e){}
 
-      const onMeta = ()=>{
+      const onMeta = () => {
         try{
           const vw = videoElem.videoWidth || 1; const vh = videoElem.videoHeight || 1; const aspect = vw / vh;
           const desiredWidth = screenW; const desiredHeight = desiredWidth / aspect;
+
           if(remoteScreen && remoteScreen.geometry){ remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(desiredWidth, desiredHeight); }
-          remoteScreen.rotation.y = Math.PI; remoteScreen.position.y = 1.6;
+          remoteScreen.rotation.y = Math.PI; remoteScreen.position.y = 1.6; remoteScreen.visible = true;
 
           if(__remoteVideoTexture){ __remoteVideoTexture.dispose(); __remoteVideoTexture = null; }
           __remoteVideoTexture = new THREE.VideoTexture(videoElem);
-          __remoteVideoTexture.minFilter = THREE.LinearFilter; __remoteVideoTexture.magFilter = THREE.LinearFilter;
-          __remoteVideoTexture.format = THREE.RGBAFormat; __remoteVideoTexture.generateMipmaps = false;
+          __remoteVideoTexture.minFilter = THREE.LinearFilter; __remoteVideoTexture.magFilter = THREE.LinearFilter; __remoteVideoTexture.format = THREE.RGBAFormat; __remoteVideoTexture.generateMipmaps = false;
           const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) __remoteVideoTexture.anisotropy = a2;
 
-          remoteScreen.material.map = __remoteVideoTexture; remoteScreen.material.needsUpdate = true; remoteScreen.visible = true;
+          remoteScreen.material.map = __remoteVideoTexture; remoteScreen.material.needsUpdate = true;
           nameTagRight.innerText = 'Her (live)';
         }catch(err){ console.warn('applyRemoteStream meta error', err); }
       };
@@ -255,7 +238,11 @@
       try{ videoElem.removeEventListener('loadedmetadata', onMeta); }catch(e){}
       videoElem.addEventListener('loadedmetadata', onMeta, { once:true });
       try{ videoElem.play().catch(()=>{}); }catch(e){}
-      ensureUnmuteButton();
+
+      // unmute button for user gesture
+      if(!document.getElementById('unmuteRemoteBtn')){
+        const b = document.createElement('button'); b.id='unmuteRemoteBtn'; b.innerText='Unmute Remote'; b.style.position='fixed'; b.style.top='80px'; b.style.right='12px'; b.style.zIndex=3000; b.style.padding='6px 8px'; b.style.borderRadius='8px'; b.style.background='rgba(0,0,0,0.6)'; b.style.color='white'; b.addEventListener('click', ()=>{ try{ remoteVideo.muted = false; b.remove(); }catch(e){} }); document.body.appendChild(b);
+      }
     }
 
     async function createPeer(){
