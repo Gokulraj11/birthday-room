@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>3D Birthday Room — Prototype</title>
+  <title>3D Birthday Room — Prototype (WebRTC, sanitized SDP)</title>
   <style>
     :root{ --bg:#f7f7fb; --card:#ffffff; --accent:#ff5c8a; --topbar-h:64px; --gap:12px; }
     html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:#111}
@@ -17,7 +17,9 @@
     button.primary{background:linear-gradient(90deg,var(--accent),#ffa6c9);color:white;border:none}
     button.ghost{background:transparent}
     .debug { position:fixed; left:12px; top:80px; background:rgba(0,0,0,0.6); color:white; padding:6px 10px; border-radius:8px; font-size:12px; z-index:2000 }
-    @media (max-width:720px){ .controls input[type="text"]{min-width:120px} .topbar{flex-wrap:wrap;height:auto;padding:10px} #canvas-wrapper{top:calc(var(--gap) + 120px)} }
+    .signal-ui { display:flex; gap:8px; align-items:center; }
+    .signal-ui textarea { width:420px; height:120px; resize:vertical; padding:8px; border-radius:8px; border:1px solid rgba(0,0,0,0.06); background:var(--card); font-family:monospace; font-size:12px; }
+    @media (max-width:960px){ .signal-ui textarea{ width:200px; height:80px } .controls input[type="text"]{min-width:120px} .topbar{flex-wrap:wrap;height:auto;padding:10px} #canvas-wrapper{top:calc(var(--gap) + 120px)} }
   </style>
 
   <script type="importmap">
@@ -27,28 +29,32 @@
     }
   }
   </script>
-
-  <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 </head>
 <body>
   <div class="topbar" role="banner">
-    <div class="brand">🎂 Birthday Room — Prototype</div>
+    <div class="brand">🎂 Birthday Room — Prototype (WebRTC)</div>
     <div class="controls" id="controls">
       <button id="startBtn" class="primary">Start Camera &amp; Mic</button>
       <button id="resetCake" class="ghost">Reset Cake</button>
-      <button id="forceLowBtn" class="ghost" title="Force low-res">Force Low-Res</button>
 
       <div id="peerUi" style="display:flex;align-items:center;gap:8px;margin-left:auto">
-        <div id="peerIdLabel" style="padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.95);font-weight:600;min-width:180px;text-align:center">Peer: (not ready)</div>
-        <input id="callInput" type="text" placeholder="Partner PeerID" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(0,0,0,0.06)" />
-        <button id="callBtn">Call</button>
-        <button id="copyShare" title="Copy my PeerID" style="padding:8px 12px;border-radius:8px;background:linear-gradient(90deg,var(--accent),#ffa6c9);color:white;">Copy ID</button>
+        <div id="peerIdLabel" style="padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.95);font-weight:600;min-width:180px;text-align:center">WebRTC: manual SDP</div>
+        <button id="makeOffer">Create Offer</button>
+        <button id="acceptOffer">Accept Offer / Create Answer</button>
+        <button id="setRemote">Set Remote SDP</button>
       </div>
     </div>
   </div>
 
   <div id="canvas-wrapper" aria-live="polite">
     <div id="canvas-container"></div>
+
+    <div id="signal-area" style="position:absolute; right:16px; top:110px; z-index:1500; background:rgba(255,255,255,0.95); padding:8px; border-radius:8px; box-shadow:0 8px 30px rgba(0,0,0,0.08)">
+      <div style="font-weight:600;margin-bottom:6px">Local SDP (copy → send to peer)</div>
+      <textarea id="localSDP" readonly></textarea>
+      <div style="font-weight:600;margin:8px 0 6px">Remote SDP (paste ← from peer)</div>
+      <textarea id="remoteSDP"></textarea>
+    </div>
   </div>
 
   <div id="debug" class="debug" style="display:none">Debug</div>
@@ -59,7 +65,24 @@
 
     function dbg(text){ const el = document.getElementById('debug'); if(!el) return; el.style.display='block'; el.innerText = text; }
 
-    // --- three setup -------------------------------------------------------
+    // --- SDP sanitizer -------------------------------------------------------
+    // Remove offending SDP attribute lines (like a=max-message-size) that some browsers reject.
+    function sanitizeSDP(raw) {
+      if (!raw || typeof raw !== 'string') return raw;
+      // normalize and split into lines
+      const lines = raw.replace(/\r/g, '').split('\n');
+      const filtered = lines.filter(l => {
+        // strip lines that start with a=max-message-size:
+        if (/^\s*a=max-message-size:/i.test(l)) return false;
+        // If you encounter other problematic attributes, add them here:
+        // if (/^\s*a=some-bad-attr:/i.test(l)) return false;
+        return true;
+      });
+      // join with CRLF which is the expected line ending for SDP
+      return filtered.join('\r\n');
+    }
+
+    // --- basic three setup -------------------------------------------------
     const container = document.getElementById('canvas-container');
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -72,365 +95,324 @@
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 1.4, 0);
-    controls.enableDamping = true; controls.dampingFactor = 0.08;
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
     controls.minDistance = 2.0; controls.maxDistance = 7.0;
     controls.minPolarAngle = Math.PI * 0.15; controls.maxPolarAngle = Math.PI * 0.48;
     function clampTarget(){ const t = controls.target; t.x = Math.max(Math.min(t.x, 4), -4); t.y = Math.max(Math.min(t.y, 2.4), 0.8); t.z = Math.max(Math.min(t.z, 1.5), -3.5); controls.target.set(t.x,t.y,t.z); }
-    clampTarget(); controls.update();
-    controls.addEventListener('change', ()=>{ clampTarget(); const dist = camera.position.distanceTo(controls.target); if(dist < controls.minDistance){ const dir = new THREE.Vector3(); camera.getWorldDirection(dir); camera.position.addScaledVector(dir, -(controls.minDistance - dist)); } if(dist > controls.maxDistance){ const dir = new THREE.Vector3(); camera.getWorldDirection(dir); camera.position.addScaledVector(dir, (dist - controls.maxDistance)); } });
+    clampTarget(); controls.update(); controls.addEventListener('change', ()=>{ clampTarget(); const dist = camera.position.distanceTo(controls.target); if(dist < controls.minDistance){ const dir = new THREE.Vector3(); camera.getWorldDirection(dir); camera.position.addScaledVector(dir, -(controls.minDistance - dist)); } if(dist > controls.maxDistance){ const dir = new THREE.Vector3(); camera.getWorldDirection(dir); camera.position.addScaledVector(dir, (dist - controls.maxDistance)); } });
 
     // --- room, cake, candles -----------------------------------------------
     const room = new THREE.Mesh(new THREE.BoxGeometry(12,6,10), new THREE.MeshStandardMaterial({ color:0xf5f5f5, side: THREE.BackSide })); room.position.y = 3; scene.add(room);
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(12,10), new THREE.MeshStandardMaterial({ color:0xefe6e6 })); floor.rotation.x = -Math.PI/2; floor.receiveShadow = true; floor.position.y = 0; scene.add(floor);
-    const hemi = new THREE.HemisphereLight(0xffffee,0x8888ff,0.6); scene.add(hemi);
+    scene.add(new THREE.HemisphereLight(0xffffee,0x8888ff,0.6));
     const spot = new THREE.PointLight(0xfff7dd,1.1,20); spot.position.set(0,4,2); scene.add(spot);
 
     const cakeGroup = new THREE.Group();
-    const cakeBody = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.6,32), new THREE.MeshStandardMaterial({ color:0xffc0cb }));
-    cakeBody.position.y = 0.5; cakeGroup.add(cakeBody);
-    const cakeTop = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.05,32), new THREE.MeshStandardMaterial({ color:0xffffff }));
-    cakeTop.position.y = 0.8; cakeGroup.add(cakeTop);
+    const cakeBody = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.6,32), new THREE.MeshStandardMaterial({ color:0xffc0cb })); cakeBody.position.y = 0.5; cakeGroup.add(cakeBody);
+    const cakeTop = new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,0.05,32), new THREE.MeshStandardMaterial({ color:0xffffff })); cakeTop.position.y = 0.8; cakeGroup.add(cakeTop);
     cakeGroup.position.set(0,0,-1); scene.add(cakeGroup);
 
-    const candles = [];
-    const flameSprites = [];
-    function createCandles() {
-      for (let i = 0; i < 5; i++) {
-        const theta = (i / 5) * Math.PI * 2;
-        const x = Math.cos(theta) * 0.3;
-        const z = Math.sin(theta) * 0.3;
-        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.25, 12), new THREE.MeshStandardMaterial({ color: 0xffffff }));
-        candle.position.set(x, 0.95, z - 1); scene.add(candle); candles.push(candle);
-
-        const cvs = document.createElement('canvas'); cvs.width = 64; cvs.height = 64; const ctx = cvs.getContext('2d');
-        const g = ctx.createRadialGradient(32, 16, 4, 32, 32, 32); g.addColorStop(0, 'rgba(255,255,200,1)'); g.addColorStop(0.4, 'rgba(255,140,0,0.95)'); g.addColorStop(1, 'rgba(255,100,0,0)');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(32, 22, 10, 16, 0, 0, Math.PI * 2); ctx.fill();
-        const map = new THREE.CanvasTexture(cvs);
-        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthWrite: false })); sprite.scale.set(0.18, 0.28, 1); sprite.position.set(x, 1.08, z - 1); scene.add(sprite); flameSprites.push(sprite);
+    const candles = [], flameSprites = [];
+    function createCandles(){
+      for(let i=0;i<5;i++){
+        const theta = (i/5)*Math.PI*2; const x = Math.cos(theta)*0.3; const z = Math.sin(theta)*0.3;
+        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.25,12), new THREE.MeshStandardMaterial({ color:0xffffff }));
+        candle.position.set(x,0.95,z-1); scene.add(candle); candles.push(candle);
+        const cvs = document.createElement('canvas'); cvs.width=64; cvs.height=64; const ctx = cvs.getContext('2d'); const g = ctx.createRadialGradient(32,16,4,32,32,32); g.addColorStop(0,'rgba(255,255,200,1)'); g.addColorStop(0.4,'rgba(255,140,0,0.95)'); g.addColorStop(1,'rgba(255,100,0,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(32,22,10,16,0,0,Math.PI*2); ctx.fill(); const map = new THREE.CanvasTexture(cvs); const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthWrite:false })); sprite.scale.set(0.18,0.28,1); sprite.position.set(x,1.08,z-1); scene.add(sprite); flameSprites.push(sprite);
       }
     }
     createCandles();
 
     let candlesLit = true;
-    function extinguishCandles() { if (!candlesLit) return; candlesLit = false; let t = 1; const fade = () => { t -= 0.06; flameSprites.forEach(s => s.material.opacity = Math.max(0, t)); if (t > 0) requestAnimationFrame(fade); else { flameSprites.forEach(s => s.visible = false); showHappyText(); startConfetti(); } }; fade(); }
-    function resetCandles() { candlesLit = true; flameSprites.forEach(s => { s.visible = true; s.material.opacity = 1 }); stopConfetti(); hideHappyText(); }
+    function extinguishCandles(){ if(!candlesLit) return; candlesLit=false; let t=1; const fade = ()=>{ t -= 0.06; flameSprites.forEach(s=>s.material.opacity = Math.max(0,t)); if(t>0) requestAnimationFrame(fade); else { flameSprites.forEach(s=>s.visible=false); showHappyText(); startConfetti(); } }; fade(); }
+    function resetCandles(){ candlesLit=true; flameSprites.forEach(s=>{ s.visible = true; s.material.opacity = 1 }); stopConfetti(); hideHappyText(); }
 
-    const happyDiv = document.createElement('div');
-    happyDiv.style.position = 'absolute'; happyDiv.style.left = '50%'; happyDiv.style.top = '6%'; happyDiv.style.transform = 'translateX(-50%)';
-    happyDiv.style.fontSize = '44px'; happyDiv.style.fontWeight = '700'; happyDiv.style.color = 'crimson'; happyDiv.style.textShadow = '0 6px 18px rgba(0,0,0,0.25)'; happyDiv.style.display = 'none'; happyDiv.innerText = 'HAPPY BIRTHDAY 🎉';
-    document.getElementById('canvas-wrapper').appendChild(happyDiv);
-    function showHappyText() { happyDiv.style.display = 'block'; } function hideHappyText() { happyDiv.style.display = 'none'; }
+    const happyDiv = document.createElement('div'); happyDiv.style.position='absolute'; happyDiv.style.left='50%'; happyDiv.style.top='6%'; happyDiv.style.transform='translateX(-50%)'; happyDiv.style.fontSize='44px'; happyDiv.style.fontWeight='700'; happyDiv.style.color='crimson'; happyDiv.style.textShadow='0 6px 18px rgba(0,0,0,0.25)'; happyDiv.style.display='none'; happyDiv.innerText='HAPPY BIRTHDAY 🎉'; document.getElementById('canvas-wrapper').appendChild(happyDiv); function showHappyText(){ happyDiv.style.display='block'; } function hideHappyText(){ happyDiv.style.display='none'; }
 
-    // Confetti
+    // confetti (lightweight particle spawn)
     let confettiParticles = null, confettiRunning = false;
-    function startConfetti() { if (confettiRunning) return; confettiRunning = true; confettiParticles = []; for (let i = 0; i < 120; i++) { confettiParticles.push({ x: (Math.random() - 0.5) * 3, y: 3.2, z: (Math.random() - 0.5) * 3, vx: (Math.random() - 0.5) * 0.06, vy: -0.01 - Math.random() * 0.03, rot: Math.random() * Math.PI, color: `hsl(${Math.random() * 360},70%,60%)` }); } }
-    function stopConfetti() { confettiRunning = false; confettiParticles = null; }
-    function drawConfetti() { if (!confettiRunning) return; confettiParticles.forEach(p => { p.x += p.vx; p.y += p.vy; p.rot += 0.2; if (p.y < 0.05) p.y = 0.05; const s = 0.04; const mat = new THREE.MeshBasicMaterial({ color: p.color }); const geo = new THREE.PlaneGeometry(s, s * 1.6); const mesh = new THREE.Mesh(geo, mat); mesh.position.set(p.x, p.y, p.z); mesh.rotation.y = p.rot; scene.add(mesh); setTimeout(() => { scene.remove(mesh); geo.dispose(); mat.dispose(); }, 40); }); }
+    function startConfetti(){ if(confettiRunning) return; confettiRunning=true; confettiParticles = []; for(let i=0;i<120;i++){ confettiParticles.push({ x:(Math.random()-0.5)*3, y:3.2, z:(Math.random()-0.5)*3, vx:(Math.random()-0.5)*0.06, vy:-0.01-Math.random()*0.03, rot:Math.random()*Math.PI, color:`hsl(${Math.random()*360},70%,60%)` }); } }
+    function stopConfetti(){ confettiRunning=false; confettiParticles=null; }
+    function drawConfetti(){ if(!confettiRunning) return; confettiParticles.forEach(p=>{ p.x += p.vx; p.y += p.vy; p.rot += 0.2; if(p.y < 0.05) p.y = 0.05; const s = 0.04; const mat = new THREE.MeshBasicMaterial({ color: p.color }); const geo = new THREE.PlaneGeometry(s,s*1.6); const mesh = new THREE.Mesh(geo, mat); mesh.position.set(p.x,p.y,p.z); mesh.rotation.y = p.rot; scene.add(mesh); setTimeout(()=>{ scene.remove(mesh); geo.dispose(); mat.dispose(); }, 40); }); }
 
-    // Video panels (local preview)
+    // --- video textures & screens (back wall) --------------------------------
     const videoEl = document.createElement('video'); videoEl.autoplay = true; videoEl.muted = true; videoEl.playsInline = true;
-    const videoTexture = new THREE.VideoTexture(videoEl);
-    videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter; videoTexture.format = THREE.RGBAFormat; videoTexture.generateMipmaps = false;
-    const aniso = renderer.capabilities.getMaxAnisotropy(); if (aniso) videoTexture.anisotropy = aniso;
+    const videoTexture = new THREE.VideoTexture(videoEl); videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter; videoTexture.format = THREE.RGBAFormat; videoTexture.generateMipmaps = false; const aniso = renderer.capabilities.getMaxAnisotropy(); if(aniso) videoTexture.anisotropy = aniso;
 
-    // side-by-side portrait screens on back wall (fixed size)
-    let screenW = 1.4, screenH = 2.6, gap = 0.35;
-    const localPreview = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ map: videoTexture, toneMapped: false, side: THREE.DoubleSide }));
-    localPreview.position.set(-screenW / 2 - gap, 1.6, -4.85); localPreview.rotation.y = Math.PI; scene.add(localPreview);
-
-    const remoteScreen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide }));
-    remoteScreen.position.set(screenW / 2 + gap, 1.6, -4.85); remoteScreen.rotation.y = Math.PI; remoteScreen.visible = false; scene.add(remoteScreen);
+    // two side-by-side portrait screens on back wall
+    let screenW = 2.8, screenH = 3.0, gap = 0.35;
+    const localPreview = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ map: videoTexture, toneMapped:false, side:THREE.DoubleSide }));
+    localPreview.position.set(-screenW/2 - gap, 2.2, -4.85); localPreview.rotation.y = Math.PI; scene.add(localPreview);
+    const remoteScreen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), new THREE.MeshBasicMaterial({ color:0x000000, side:THREE.DoubleSide }));
+    remoteScreen.position.set(screenW/2 + gap, 2.2, -4.85); remoteScreen.rotation.y = Math.PI; scene.add(remoteScreen);
 
     // name badges
-    const nameTagLeft = document.createElement('div'); nameTagLeft.style.position = 'fixed'; nameTagLeft.style.left = '16px'; nameTagLeft.style.bottom = '16px'; nameTagLeft.style.padding = '6px 10px'; nameTagLeft.style.borderRadius = '12px'; nameTagLeft.style.background = 'rgba(255,255,255,0.9)'; nameTagLeft.innerText = 'You'; document.body.appendChild(nameTagLeft);
-    const nameTagRight = document.createElement('div'); nameTagRight.style.position = 'fixed'; nameTagRight.style.right = '16px'; nameTagRight.style.bottom = '16px'; nameTagRight.style.padding = '6px 10px'; nameTagRight.style.borderRadius = '12px'; nameTagRight.style.background = 'rgba(255,255,255,0.9)'; nameTagRight.innerText = 'Her (waiting)'; document.body.appendChild(nameTagRight);
+    const nameTagLeft = document.createElement('div'); nameTagLeft.style.position='fixed'; nameTagLeft.style.left='16px'; nameTagLeft.style.bottom='16px'; nameTagLeft.style.padding='6px 10px'; nameTagLeft.style.borderRadius='12px'; nameTagLeft.style.background='rgba(255,255,255,0.9)'; nameTagLeft.innerText='You'; document.body.appendChild(nameTagLeft);
+    const nameTagRight = document.createElement('div'); nameTagRight.style.position='fixed'; nameTagRight.style.right='16px'; nameTagRight.style.bottom='16px'; nameTagRight.style.padding='6px 10px'; nameTagRight.style.borderRadius='12px'; nameTagRight.style.background='rgba(255,255,255,0.9)'; nameTagRight.innerText='Her'; document.body.appendChild(nameTagRight);
 
     // --- audio blow detection ------------------------------------------------
     let audioCtx, analyser, micStream; let blowCooldown = false;
     function startAudioProcessing(stream) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       micStream = audioCtx.createMediaStreamSource(stream);
-      analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
       micStream.connect(analyser);
       const data = new Uint8Array(analyser.frequencyBinCount);
-      let history = [], lastTrigger = 0, warmupSamples = 0;
-      const WARMUP_REQUIRED = 30, MIN_ABSOLUTE = 30, SUSTAIN_FRAMES = 2; let consecSpike = 0;
+
+      let history = [];
+      let lastTrigger = 0;
+      let warmupSamples = 0;
+      const WARMUP_REQUIRED = 30; // number of frames to collect baseline (~0.5 - 1s)
+      const MIN_ABSOLUTE = 60;
+      const SUSTAIN_FRAMES = 2;
+      let consecSpike = 0;
 
       function analyze() {
-        try { analyser.getByteFrequencyData(data); } catch(e){ requestAnimationFrame(analyze); return; }
-        let sum = 0; for (let i=0;i<data.length;i++){ sum += data[i]*data[i]; }
-        const rms = Math.sqrt(sum / data.length);
-        if (warmupSamples < WARMUP_REQUIRED) { history.push(rms); if (history.length > WARMUP_REQUIRED) history.shift(); warmupSamples++; requestAnimationFrame(analyze); return; }
-        history.push(rms); if (history.length > 60) history.shift();
-        const baseline = history.reduce((a,b)=>a+b,0)/history.length;
-        const now = Date.now(); const sensitivity = 2.6;
-        const isSpike = rms > Math.max(MIN_ABSOLUTE, baseline * sensitivity);
-        if (isSpike) consecSpike++; else consecSpike = 0;
-        if (!blowCooldown && consecSpike >= SUSTAIN_FRAMES && (now - lastTrigger) > 1200) {
-          lastTrigger = now; blowCooldown = true;
-          extinguishCandles();
-          try { if (dataConn && dataConn.open) dataConn.send({ type: 'blow' }); } catch (e) { console.warn('Failed to send blow event', e); }
-          setTimeout(()=>{ blowCooldown = false; }, 2000);
+        try {
+          analyser.getByteFrequencyData(data);
+        } catch (e) {
+          requestAnimationFrame(analyze);
+          return;
         }
+
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) { sum += data[i] * data[i]; }
+        const rms = Math.sqrt(sum / data.length);
+
+        if (warmupSamples < WARMUP_REQUIRED) {
+          history.push(rms);
+          if (history.length > WARMUP_REQUIRED) history.shift();
+          warmupSamples++;
+          requestAnimationFrame(analyze);
+          return;
+        }
+
+        history.push(rms);
+        if (history.length > 60) history.shift();
+        const baseline = history.reduce((a, b) => a + b, 0) / history.length;
+
+        const now = Date.now();
+        const sensitivity = 2.6;
+        const isSpike = rms > Math.max(MIN_ABSOLUTE, baseline * sensitivity);
+
+        if (isSpike) consecSpike++; else consecSpike = 0;
+
+        if (!blowCooldown && consecSpike >= SUSTAIN_FRAMES && (now - lastTrigger) > 1200) {
+          lastTrigger = now;
+          blowCooldown = true;
+
+          extinguishCandles();
+          try { if (dataChannel && dataChannel.readyState === 'open') { dataChannel.send(JSON.stringify({ type: 'blow' })); } } catch (e) { console.warn('Failed to send blow event', e); }
+
+          setTimeout(() => { blowCooldown = false; }, 2000);
+        }
+
         requestAnimationFrame(analyze);
       }
-      for (let i=0;i<6;i++) history.push(8);
+
+      for (let i = 0; i < 6; i++) history.push(8);
       analyze();
     }
 
-    // --- PeerJS integration --------------------------------------------------
-    let peer = null, localStream = null, dataConn = null, currentCall = null;
-    let autoLowEnabled = true; // we will auto downgrade when network poor
-    let autoLowState = false; // currently in auto-low state
-    let monitorInterval = null;
+    // --- WebRTC integration (manual SDP signaling) ---------------------------
+    let pc = null;
+    let dataChannel = null;
+    let localStream = null;
+    let remoteVideo = document.createElement('video');
+    remoteVideo.autoplay = true; remoteVideo.playsInline = true; remoteVideo.muted = false; remoteVideo.style.display = 'none'; document.body.appendChild(remoteVideo);
 
-    window._br_state = { peerRef: () => peer, currentCallRef: () => currentCall };
+    // STUN servers (public). Add TURN servers if you have them.
+    const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
-    const peerIdLabel = document.getElementById('peerIdLabel'); const callInput = document.getElementById('callInput'); const callBtn = document.getElementById('callBtn');
-    const remoteVideo = document.createElement('video'); remoteVideo.autoplay = true; remoteVideo.playsInline = true; remoteVideo.muted = true; remoteVideo.style.display = 'none'; document.body.appendChild(remoteVideo);
+    const peerIdLabel = document.getElementById('peerIdLabel');
+    const localSDPTextarea = document.getElementById('localSDP');
+    const remoteSDPTextarea = document.getElementById('remoteSDP');
+    const makeOfferBtn = document.getElementById('makeOffer');
+    const acceptOfferBtn = document.getElementById('acceptOffer');
+    const setRemoteBtn = document.getElementById('setRemote');
 
-    function handleDataMessage(msg){ try{ if(!msg) return; if(typeof msg === 'string'){ try{ msg = JSON.parse(msg); }catch(e){} } if(msg && msg.type === 'blow'){ extinguishCandles(); } }catch(e){ console.warn('Data message error', e); } }
-
-    window.__remoteVideoTexture = null;
-
-    // Preferred media constraints (high quality) and low quality
-    const HIGH_CONSTRAINTS = { video: { width: { ideal: 1280, min: 640 }, height: { ideal: 720 }, aspectRatio: 16/9, frameRate: { ideal: 30 } }, audio: true };
-    const LOW_CONSTRAINTS = { video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 15 } }, audio: true };
-
-    async function getPreferredStream(preferLow = false) {
-      const constraints = preferLow ? LOW_CONSTRAINTS : HIGH_CONSTRAINTS;
-      try {
-        const s = await navigator.mediaDevices.getUserMedia(constraints);
-        return s;
-      } catch (e) {
-        console.warn('getUserMedia failed for preferred constraints, falling back to simpler', e);
-        try { return await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); } catch (err) { throw err; }
-      }
+    function attachRemoteStreamToScreen(stream) {
+      try { remoteVideo.srcObject = stream; remoteVideo.play().catch(()=>{}); } catch(e){}
+      const remoteTex = new THREE.VideoTexture(remoteVideo);
+      remoteTex.minFilter = THREE.LinearFilter;
+      remoteTex.magFilter = THREE.LinearFilter;
+      remoteTex.format = THREE.RGBAFormat;
+      remoteTex.generateMipmaps = false;
+      const a2 = renderer.capabilities.getMaxAnisotropy(); if(a2) remoteTex.anisotropy = a2;
+      remoteScreen.material.map = remoteTex;
+      remoteScreen.material.needsUpdate = true;
+      nameTagRight.innerText = 'Her (live)';
     }
 
-    // Replace outbound tracks on currentCall.peerConnection safely
-    async function replaceOutgoingTracksWithStream(stream) {
-      if (!currentCall || !currentCall.peerConnection) {
-        // just update local preview
-        videoEl.srcObject = stream; localStream = stream; return;
-      }
-      try {
-        const senders = currentCall.peerConnection.getSenders();
-        const vTrack = stream.getVideoTracks()[0];
-        const aTrack = stream.getAudioTracks()[0];
-        for (const s of senders) {
-          try {
-            if (s.track && s.track.kind === 'video' && vTrack) await s.replaceTrack(vTrack);
-            if (s.track && s.track.kind === 'audio' && aTrack) await s.replaceTrack(aTrack);
-          } catch (e) { console.warn('replaceTrack failed for sender', e); }
+    async function createPeerConnection() {
+      if (pc) return pc;
+      pc = new RTCPeerConnection(rtcConfig);
+
+      pc.oniceconnectionstatechange = () => {
+        dbg('ICE state: ' + pc.iceConnectionState);
+      };
+
+      pc.ontrack = (ev) => {
+        const s = (ev.streams && ev.streams[0]) ? ev.streams[0] : null;
+        if (s) attachRemoteStreamToScreen(s);
+        else {
+          // in case tracks are provided without streams, assemble them
+          const ms = new MediaStream();
+          ms.addTrack(ev.track);
+          attachRemoteStreamToScreen(ms);
         }
-        videoEl.srcObject = stream; localStream = stream;
-      } catch (err) { console.warn('replaceOutgoingTracksWithStream failed', err); }
-    }
+      };
 
-    // Network monitor: checks inbound-rtp bytesReceived for video receiver and downgrades if low
-    let monitorState = { lastBytes: 0, lastTs: 0, lowConsecutive: 0 };
-    function startMonitorForCall(call) {
-      stopMonitor();
-      if (!call || !call.peerConnection) return;
-      monitorState = { lastBytes: 0, lastTs: 0, lowConsecutive: 0 };
-      monitorInterval = setInterval(async () => {
-        try {
-          const pc = call.peerConnection;
-          const stats = await pc.getStats();
-          let inboundVideo = null;
-          stats.forEach(report => {
-            if (report.type === 'inbound-rtp' && report.kind === 'video') inboundVideo = report;
-            // firefox sometimes reports as 'inbound-rtp' without kind, check mediaType
-            if (!inboundVideo && report.type === 'inbound-rtp' && report.mediaType === 'video') inboundVideo = report;
-          });
+      pc.onaddstream = (ev) => { if(ev.stream) attachRemoteStreamToScreen(ev.stream); };
 
-          if (!inboundVideo) {
-            // fallback: try to find track stats or remote-inbound-rtp
-            stats.forEach(report => { if (!inboundVideo && (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') && (report.kind === 'video' || report.mediaType === 'video')) inboundVideo = report; });
-          }
+      pc.ondatachannel = (ev) => {
+        dataChannel = ev.channel;
+        setupDataChannelHandlers();
+      };
 
-          if (inboundVideo && inboundVideo.bytesReceived !== undefined) {
-            const now = Date.now();
-            if (monitorState.lastTs) {
-              const deltaBytes = inboundVideo.bytesReceived - monitorState.lastBytes;
-              const deltaMs = now - monitorState.lastTs;
-              const kbps = (deltaBytes * 8) / (deltaMs); // kbps as kilobits per ms? we'll compare scaled
-              // convert to kbps (kilobits per second)
-              const approxKbps = (deltaBytes * 8) / (deltaMs / 1000);
-              // decide threshold (150 kbps)
-              if (approxKbps < 150) {
-                monitorState.lowConsecutive++;
-              } else {
-                monitorState.lowConsecutive = Math.max(0, monitorState.lowConsecutive - 1);
-                if (autoLowState) {
-                  // network recovered, restore high if user didn't force low
-                  autoLowState = false; console.log('Network recovered (kbps=', Math.round(approxKbps), '). Restoring high quality.');
-                  const h = await getPreferredStream(false).catch(()=>null);
-                  if (h) await replaceOutgoingTracksWithStream(h).catch(()=>{});
-                }
-              }
-
-              if (!autoLowState && monitorState.lowConsecutive >= 2 && autoLowEnabled) {
-                // downgrade
-                console.log('Detected low inbound bitrate (approx kbps=', Math.round(approxKbps), '). Downgrading to low-res.');
-                autoLowState = true; // mark auto low engaged
-                const low = await getPreferredStream(true).catch(()=>null);
-                if (low) await replaceOutgoingTracksWithStream(low).catch(()=>{});
-              }
-            }
-            monitorState.lastBytes = inboundVideo.bytesReceived; monitorState.lastTs = Date.now();
-          }
-        } catch (e) { console.warn('monitor error', e); }
-      }, 3000);
-    }
-    function stopMonitor(){ if (monitorInterval) { clearInterval(monitorInterval); monitorInterval = null; } }
-
-    // Robust applyRemoteStream: simplified to attach once playable and show fixed remoteScreen
-    function applyRemoteStream(videoElem) {
-      try { videoElem.style.display = 'none'; videoElem.playsInline = true; } catch(e){}
-      try { if (remoteScreen && remoteScreen.geometry) { remoteScreen.geometry.dispose(); remoteScreen.geometry = new THREE.PlaneGeometry(screenW, screenH); }} catch(e){}
-      remoteScreen.rotation.y = Math.PI; remoteScreen.position.y = 1.6; remoteScreen.visible = false;
-
-      function attachIfReady() {
-        if (!videoElem || !videoElem.srcObject) return false;
-        if (videoElem.readyState <= 2 || videoElem.videoWidth === 0) return false;
-        try {
-          if (window.__remoteVideoTexture) { try { window.__remoteVideoTexture.dispose(); } catch(e){} window.__remoteVideoTexture = null; }
-          window.__remoteVideoTexture = new THREE.VideoTexture(videoElem);
-          window.__remoteVideoTexture.minFilter = THREE.LinearFilter; window.__remoteVideoTexture.magFilter = THREE.LinearFilter; window.__remoteVideoTexture.format = THREE.RGBAFormat; window.__remoteVideoTexture.generateMipmaps = false;
-          const an = renderer.capabilities.getMaxAnisotropy(); if (an) window.__remoteVideoTexture.anisotropy = an;
-          remoteScreen.material.map = window.__remoteVideoTexture; remoteScreen.material.needsUpdate = true; remoteScreen.visible = true;
-          if (nameTagRight) nameTagRight.innerText = 'Her (live)';
-          console.log('attachTexture: VideoTexture attached (dims)', videoElem.videoWidth, videoElem.videoHeight);
-          return true;
-        } catch (err) { console.warn('attach failed', err); return false; }
+      if (localStream) {
+        for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
       }
 
-      const onPlayable = () => { try { videoElem.muted = true; } catch(e){}; attachIfReady(); cleanup(); };
-      const cleanup = () => { videoElem.removeEventListener('loadeddata', onPlayable); videoElem.removeEventListener('canplay', onPlayable); videoElem.removeEventListener('playing', onPlayable); };
-      videoElem.addEventListener('loadeddata', onPlayable, { once: true }); videoElem.addEventListener('canplay', onPlayable, { once: true }); videoElem.addEventListener('playing', onPlayable, { once: true });
-
-      // try immediate attach as well
-      setTimeout(()=>{ if (!attachIfReady()) { try { videoElem.play().catch(()=>{}); } catch(e){} } }, 80);
-
-      // fallback timeout
-      setTimeout(()=>{ if (!attachIfReady()) { console.warn('applyRemoteStream: frames not ready after timeout'); try { videoElem.play().catch(()=>{}); } catch(e){} } }, 4000);
+      return pc;
     }
 
-    async function handleIncomingRemoteStream(remoteStream, callerPeerId) {
-      try { remoteVideo.srcObject = remoteStream; } catch (e) { console.warn('attach srcObject failed', e); }
-      applyRemoteStream(remoteVideo);
-      if (currentCall) startMonitorForCall(currentCall);
+    function setupDataChannelHandlers(){
+      if(!dataChannel) return;
+      dataChannel.onopen = () => { dbg('Data channel open'); };
+      dataChannel.onclose = () => { dbg('Data channel closed'); };
+      dataChannel.onmessage = (ev) => {
+        try{
+          let msg = ev.data;
+          try{ msg = JSON.parse(msg); }catch(e){}
+          if(msg && msg.type === 'blow'){ extinguishCandles(); }
+        }catch(e){ console.warn('Data message parsing', e); }
+      };
     }
 
-    // createPeer helper (PeerJS)
-    async function createPeer(){
-      if(peer) return peer;
-      const PeerCtor = window.Peer || window.peer || null;
-      if (!PeerCtor) { peerIdLabel.innerText = 'PeerJS not loaded'; console.warn('PeerJS missing'); return null; }
-      try { peer = new PeerCtor(); window._br_state.peer = peer; } catch(e) { console.warn('Peer creation failed', e); peerIdLabel.innerText = 'Peer init failed'; return null; }
-
-      peer.on('open', id => {
-        peerIdLabel.innerText = 'Your PeerID: ' + id;
-        const copyBtn = document.getElementById('copyShare');
-        if (copyBtn) copyBtn.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(id); copyBtn.innerText = 'Copied!'; setTimeout(()=>copyBtn.innerText='Copy ID',1200); }catch(e){ console.warn('Copy failed', e); } });
-      });
-
-      async function handleCallAsync(call) {
-        currentCall = call; window._br_state.currentCall = currentCall;
-        console.log('Incoming call from', call.peer);
-        try {
-          if (!localStream) {
-            try { const s = await getPreferredStream(false); localStream = s; videoEl.srcObject = s; await videoEl.play().catch(()=>{}); startAudioProcessing(s); if (startBtn) { startBtn.disabled = true; startBtn.innerText = 'Camera & Mic Running'; } }
-            catch(e) { console.warn('Failed to get local stream before answering', e); }
+    // Wait until ICE gathering is complete then return SDP string.
+    function waitForIceGatheringComplete(pcInstance, timeout = 7000){
+      return new Promise((resolve, reject) => {
+        if (!pcInstance) return reject('No pc');
+        if (pcInstance.iceGatheringState === 'complete') return resolve(pcInstance.localDescription.sdp);
+        const onState = () => {
+          if (pcInstance.iceGatheringState === 'complete') {
+            pcInstance.removeEventListener('icegatheringstatechange', onState);
+            resolve(pcInstance.localDescription.sdp);
           }
-        } catch(e) { console.warn('pre-answer stream error', e); }
-
-        if (localStream) call.answer(localStream);
-        call.on('stream', remoteStream => { handleIncomingRemoteStream(remoteStream, call.peer); });
-        call.on('close', ()=>{ if (currentCall === call) currentCall = null; stopMonitor(); });
-      }
-
-      peer.on('call', call => { handleCallAsync(call); });
-
-      peer.on('connection', conn => {
-        console.log('Data connection from', conn.peer);
-        dataConn = conn;
-        dataConn.on('open', ()=>{});
-        dataConn.on('data', d => handleDataMessage(d));
-        dataConn.on('close', ()=>{ if (dataConn && dataConn.peer === conn.peer) dataConn = null; });
+        };
+        pcInstance.addEventListener('icegatheringstatechange', onState);
+        setTimeout(()=>{
+          if (pcInstance.localDescription) resolve(pcInstance.localDescription.sdp); else reject('ICE gather timeout');
+        }, timeout);
       });
-
-      peer.on('error', err => { console.warn('Peer error', err); peerIdLabel.innerText = 'Peer error'; });
-      peer.on('disconnected', ()=>{ peerIdLabel.innerText = 'Peer disconnected'; });
-      return peer;
     }
 
-    // wire start button
+    // Create Offer (caller)
+    makeOfferBtn.addEventListener('click', async ()=>{
+      try{
+        if(!localStream) return alert('Start camera first');
+        await createPeerConnection();
+        // create data channel for events
+        dataChannel = pc.createDataChannel('events');
+        setupDataChannelHandlers();
+
+        // ensure local tracks present
+        for (const t of localStream.getTracks()) {
+          try{ pc.addTrack(t, localStream); }catch(e){}
+        }
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const sdp = await waitForIceGatheringComplete(pc, 7000);
+        // present full SDP to user (DO NOT sanitize your own local SDP)
+        localSDPTextarea.value = sdp || (pc.localDescription && pc.localDescription.sdp) || '';
+        peerIdLabel.innerText = 'Offer ready — copy Local SDP and send to peer';
+      }catch(e){ console.error(e); alert('Create offer failed: ' + (e && e.message)); }
+    });
+
+    // Accept Offer (callee): expects remoteSDP textarea to contain the offer SDP (pasted by user)
+    acceptOfferBtn.addEventListener('click', async ()=>{
+      try{
+        const remote = remoteSDPTextarea.value.trim();
+        if(!remote) return alert('Paste remote (offer) SDP into Remote SDP first');
+        await createPeerConnection();
+        const sanitizedOffer = sanitizeSDP(remote);
+        await pc.setRemoteDescription({ type: 'offer', sdp: sanitizedOffer });
+
+        // create answer and set local
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        const sdp = await waitForIceGatheringComplete(pc, 7000);
+        localSDPTextarea.value = sdp || (pc.localDescription && pc.localDescription.sdp) || '';
+        peerIdLabel.innerText = 'Answer ready — copy Local SDP (answer) and send back';
+      }catch(e){ console.error(e); alert('Accept offer failed: ' + (e && e.message)); }
+    });
+
+    // Set Remote (used by caller to paste the answer, or for other flows)
+    setRemoteBtn.addEventListener('click', async ()=>{
+      try{
+        const remote = remoteSDPTextarea.value.trim();
+        if(!remote) return alert('Paste remote SDP (offer or answer) into Remote SDP first');
+        await createPeerConnection();
+
+        const sanitized = sanitizeSDP(remote);
+
+        // If local description exists and is an offer, treat incoming as answer
+        if (pc.localDescription && pc.localDescription.type === 'offer') {
+          await pc.setRemoteDescription({ type: 'answer', sdp: sanitized });
+          peerIdLabel.innerText = 'Remote answer set — connection in progress';
+        } else {
+          // Otherwise, treat incoming as an offer and create answer (fallback)
+          await pc.setRemoteDescription({ type: 'offer', sdp: sanitized });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          const sdp = await waitForIceGatheringComplete(pc, 7000);
+          localSDPTextarea.value = sdp || (pc.localDescription && pc.localDescription.sdp) || '';
+          peerIdLabel.innerText = 'Received offer and created answer — copy Local SDP and send to peer';
+        }
+      }catch(e){ console.error(e); alert('Set remote failed: ' + (e && e.message)); }
+    });
+
+    // Start camera & mic
     const startBtn = document.getElementById('startBtn');
-    if (startBtn) startBtn.addEventListener('click', async ()=> {
-      try {
-        // request the preferred high-resolution stream (C: higher-res negotiation)
-        const stream = await getPreferredStream(false);
-        videoEl.srcObject = stream; await videoEl.play().catch(()=>{});
+    startBtn.addEventListener('click', async ()=>{
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:{ ideal:1280 }, height:{ ideal:720 }, frameRate:{ ideal:30 } }, audio:true });
+        videoEl.srcObject = stream; await videoEl.play();
         startAudioProcessing(stream);
-        localStream = stream; startBtn.disabled = true; startBtn.innerText = 'Camera & Mic Running';
-        await createPeer(); dbg('Peer initialized');
-      } catch(e) { alert('Camera/Mic access failed: ' + (e && e.message)); }
-    });
+        localStream = stream;
+        startBtn.disabled = true; startBtn.innerText = 'Camera & Mic Running';
+        dbg('Local media ready');
 
-    // handle call button
-    const callBtnEl = document.getElementById('callBtn');
-    if (callBtnEl) callBtnEl.addEventListener('click', async ()=> {
-      const otherId = (callInput && callInput.value ? callInput.value.trim() : '');
-      if (!otherId) return alert('Enter partner PeerID');
-      if (!localStream) return alert('Start camera first');
-      await createPeer();
-      try {
-        const call = peer.call(otherId, localStream);
-        currentCall = call; window._br_state.currentCall = currentCall;
-        call.on('stream', remoteStream => { handleIncomingRemoteStream(remoteStream, call.peer); });
-        call.on('close', ()=>{ if (currentCall === call) currentCall = null; stopMonitor(); });
-        if (!dataConn || dataConn.peer !== otherId) {
-          const conn = peer.connect(otherId);
-          dataConn = conn; dataConn.on('open', ()=>{}); dataConn.on('data', d => handleDataMessage(d)); dataConn.on('close', ()=>{ if (dataConn && dataConn.peer === otherId) dataConn = null; });
+        // if a pc exists already add tracks
+        if (pc) {
+          for (const t of stream.getTracks()) {
+            try { pc.addTrack(t, stream); } catch(e) {}
+          }
         }
-      } catch(e) { console.warn('Call failed', e); alert('Call failed: ' + (e && e.message)); }
-    });
-
-    // force low button
-    const forceLowBtn = document.getElementById('forceLowBtn');
-    if (forceLowBtn) forceLowBtn.addEventListener('click', async ()=>{
-      autoLowEnabled = false;
-      autoLowState = true;
-      forceLowBtn.innerText = 'Low Forced';
-      const low = await getPreferredStream(true).catch(()=>null);
-      if (low) await replaceOutgoingTracksWithStream(low).catch(()=>{});
+      }catch(e){ alert('Camera/Mic access failed: ' + (e && e.message)); }
     });
 
     // reset cake
     const resetBtn = document.getElementById('resetCake'); if(resetBtn) resetBtn.addEventListener('click', ()=> resetCandles());
 
-    // resize handler
+    // simple resize
     window.addEventListener('resize', ()=>{ const w = container.clientWidth; const h = container.clientHeight; camera.aspect = w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h); });
 
     // animation loop
-    function animate(){
-      requestAnimationFrame(animate);
-      if (candlesLit) { flameSprites.forEach((s,i)=>{ s.position.y = 1.06 + Math.sin(Date.now()*0.007 + i) * 0.01; }); }
-      try { if (window.__remoteVideoTexture) window.__remoteVideoTexture.needsUpdate = true; } catch(e) {}
-      drawConfetti(); renderer.render(scene, camera);
-    }
+    function animate(){ requestAnimationFrame(animate); if(candlesLit){ flameSprites.forEach((s,i)=>{ s.position.y = 1.06 + Math.sin(Date.now()*0.007 + i) * 0.01; }); } drawConfetti(); renderer.render(scene, camera); }
     animate();
 
-    // Expose helpful debug functions to console
-    window.__br_debug = {
-      listVideos: () => Array.from(document.querySelectorAll('video')).map((v,i)=>({idx:i, readyState:v.readyState, width:v.videoWidth, height:v.videoHeight, paused:v.paused, muted:v.muted, tracks: v.srcObject ? v.srcObject.getTracks().map(t=>({kind:t.kind,enabled:t.enabled})) : null})),
-      hasRemoteTexture: () => !!window.__remoteVideoTexture,
-      showDebug: (msg) => dbg(msg),
-      stopMonitor: () => stopMonitor()
-    };
+    // Clean up when page unloads
+    window.addEventListener('beforeunload', ()=>{
+      try{ if(pc) pc.close(); }catch(e){}
+      try{ if(localStream){ localStream.getTracks().forEach(t=>t.stop()); } }catch(e){}
+    });
   </script>
 </body>
 </html>
